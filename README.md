@@ -1,2 +1,2 @@
 # ghttp
-Go HTTP 客户端，专注于快速对接 REST API。
+A Go HTTP client designed for quick integration with REST APIs.
