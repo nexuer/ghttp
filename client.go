@@ -306,7 +306,7 @@ func (c *Client) BindResponseBody(response *http.Response, reply any) error {
 	}
 
 	if response.Body == nil || response.Body == http.NoBody {
-		return fmt.Errorf("http: no body")
+		return fmt.Errorf("response: no body")
 	}
 
 	codec, _ := CodecForResponse(response)

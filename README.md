@@ -8,6 +8,8 @@ go get github.com/nexuer/ghttp
 ## Usage
 
 ### Options
+> Note: For rate limiting and retry mechanisms, please use external libraries.
+> This keeps ghttp focused on making HTTP calls, maintaining simplicity and clarity in its design.
 
 #### Configure the HTTP RoundTripper
 
@@ -122,8 +124,7 @@ func main() {
 ```
 
 ### Debugging
-Enable debugging with `WithDebug`:
-Output example:
+Enable debugging with `WithDebug`, output example:
 ```text
 --------------------------------------------
 Trace                         Value                          

@@ -147,7 +147,7 @@ func (d *Debug) After(request *http.Request, response *http.Response, err error)
 			write(d.Writer, "< %s: %s", k, strings.Join(v, ","))
 		}
 		// response body
-		if response.Body != nil {
+		if response.Body != nil && response.Body != http.NoBody {
 			//resBodyReader := io.Reader(response.Body)
 			if responseBody, err := io.ReadAll(response.Body); err == nil {
 				response.Body = io.NopCloser(bytes.NewBuffer(responseBody))
