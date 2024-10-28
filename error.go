@@ -46,6 +46,7 @@ func (e Error) Error() string {
 		buf.WriteByte('[')
 		buf.WriteString(strconv.Itoa(e.StatusCode))
 		buf.WriteByte(']')
+		buf.WriteByte(' ')
 	}
 	if e.Err != nil {
 		buf.WriteString("- ")

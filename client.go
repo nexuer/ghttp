@@ -1,18 +1,16 @@
 package ghttp
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"os"
 	"time"
-
-	"github.com/nexuer/ghttp/encoding/json"
-
-	"github.com/nexuer/ghttp/encoding"
 )
 
 // ClientOption is HTTP client option.
@@ -29,6 +27,14 @@ type clientOptions struct {
 	proxy          func(*http.Request) (*url.URL, error)
 	debugInterface func() DebugInterface
 	debug          bool
+	not2xxError    func() error
+}
+
+// WithNot2xxError handle response status code < 200 and code > 299
+func WithNot2xxError(f func() error) ClientOption {
+	return func(c *clientOptions) {
+		c.not2xxError = f
+	}
 }
 
 // WithDebugInterface sets the function to create a new DebugInterface instance.
@@ -112,6 +118,17 @@ func NewClient(opts ...ClientOption) *Client {
 		o(&options)
 	}
 
+	if options.tlsConf != nil || options.proxy != nil {
+		if tr, ok := options.transport.(*http.Transport); ok {
+			if options.tlsConf != nil {
+				tr.TLSClientConfig = options.tlsConf
+			}
+			if options.proxy != nil {
+				tr.Proxy = options.proxy
+			}
+		}
+	}
+
 	return &Client{
 		opts: options,
 		hc: &http.Client{
@@ -119,6 +136,10 @@ func NewClient(opts ...ClientOption) *Client {
 		},
 		contentSubType: subContentType(options.contentType),
 	}
+}
+
+func (c *Client) SetEndpoint(endpoint string) {
+	c.opts.endpoint = endpoint
 }
 
 func (c *Client) setTimeout(ctx context.Context) (context.Context, context.CancelFunc, bool) {
@@ -158,6 +179,45 @@ func (c *Client) debugger() DebugInterface {
 			_, _ = w.Write(info.Table())
 		},
 	}
+}
+
+func (c *Client) Invoke(ctx context.Context, method, path string, args any, reply any, opts ...CallOption) (*http.Response, error) {
+	var (
+		body   io.Reader
+		cancel context.CancelFunc
+	)
+	// set timeout, Do() is not set repeatedly and does not trigger defer()
+	ctx, cancel, _ = c.setTimeout(ctx)
+	defer cancel()
+
+	// marshal request body
+	if args != nil {
+		codec := defaultContentType.get(c.contentSubType)
+		if codec == nil {
+			return nil, fmt.Errorf("request: unsupported content type: %s", c.opts.contentType)
+		}
+		bodyBytes, err := codec.Marshal(args)
+		if err != nil {
+			return nil, err
+		}
+		body = bytes.NewBuffer(bodyBytes)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, method, path, body)
+	if err != nil {
+		return nil, err
+	}
+
+	response, err := c.Do(req, opts...)
+	if err != nil {
+		return nil, err
+	}
+
+	if err = c.BindResponseBody(response, reply); err != nil {
+		return nil, newError(req, response, err)
+	}
+
+	return response, nil
 }
 
 // Do send an HTTP request and decodes the body of response into target.
@@ -216,20 +276,49 @@ func (c *Client) Do(req *http.Request, opts ...CallOption) (*http.Response, erro
 		}
 	}
 
+	if err = c.bindNot2xxError(response); err != nil {
+		return nil, newError(req, response, err)
+	}
+
 	return response, nil
 }
 
-// CodecForRequest get encoding.Codec via http.Request
-func CodecForRequest(r *http.Request, name ...string) (encoding.Codec, bool) {
-	headerName := "Content-Type"
-	if len(name) > 0 && name[0] != "" {
-		headerName = name[0]
+func (c *Client) bindNot2xxError(response *http.Response) error {
+	if !Not2xxCode(response.StatusCode) || c.opts.not2xxError == nil {
+		return nil
 	}
-	for _, accept := range r.Header[headerName] {
-		codec := GetCodecByContentType(accept)
-		if codec != nil {
-			return codec, true
-		}
+	// new not2xxError
+	not2xxError := c.opts.not2xxError()
+	if not2xxError == nil {
+		return nil
 	}
-	return encoding.GetCodec(json.Name), false
+
+	if err := c.BindResponseBody(response, not2xxError); err != nil {
+		return err
+	}
+
+	return not2xxError
+}
+
+func (c *Client) BindResponseBody(response *http.Response, reply any) error {
+	if reply == nil {
+		return nil
+	}
+
+	if response.Body == nil || response.Body == http.NoBody {
+		return fmt.Errorf("http: no body")
+	}
+
+	codec, _ := CodecForResponse(response)
+	if codec == nil {
+		return fmt.Errorf("response: unsupported content type: %s",
+			response.Header.Get("Content-Type"))
+	}
+
+	defer response.Body.Close()
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		return err
+	}
+	return codec.Unmarshal(body, reply)
 }

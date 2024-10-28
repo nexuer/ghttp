@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -13,6 +14,8 @@ import (
 	"strings"
 	"text/tabwriter"
 	"time"
+
+	"github.com/nexuer/ghttp/encoding"
 )
 
 type DebugInterface interface {
@@ -98,7 +101,7 @@ func (d *Debug) statTraceInfo(ctx context.Context) TraceInfo {
 
 func (d *Debug) After(request *http.Request, response *http.Response, err error) {
 	// print request and response
-	path := request.URL.RequestURI()
+	path := request.URL.String()
 	if path == "" {
 		path = "/"
 	}
@@ -112,15 +115,15 @@ func (d *Debug) After(request *http.Request, response *http.Response, err error)
 			d.traceInfo.host = request.URL.Host
 		}
 		d.traceInfo.write(d.Writer)
-		write(d.Writer, "* using %s", request.Proto)
 	}
 
+	write(d.Writer, "* using %s", request.Proto)
 	write(d.Writer, "> %s %s %s", request.Method, path, request.Proto)
 	// write request header
 	for k, v := range request.Header {
 		write(d.Writer, "> %s: %s", k, strings.Join(v, ","))
 	}
-	write(d.Writer, ">")
+
 	// request body
 	if request.GetBody != nil {
 		if reqBodyReader, err := request.GetBody(); err == nil {
@@ -134,9 +137,38 @@ func (d *Debug) After(request *http.Request, response *http.Response, err error)
 			}
 		}
 	} else {
-		write(d.Writer, "")
+		write(d.Writer, ">")
 	}
 
+	if response != nil {
+		// response
+		write(d.Writer, "< %s %s", response.Proto, response.Status)
+		for k, v := range response.Header {
+			write(d.Writer, "< %s: %s", k, strings.Join(v, ","))
+		}
+		// response body
+		if response.Body != nil {
+			//resBodyReader := io.Reader(response.Body)
+			if responseBody, err := io.ReadAll(response.Body); err == nil {
+				response.Body = io.NopCloser(bytes.NewBuffer(responseBody))
+				codec, _ := CodecForResponse(response)
+				resBodyBs, _ := formatIndent(codec, responseBody)
+				if len(resBodyBs) > 0 {
+					write(d.Writer, "")
+					write(d.Writer, "%s", string(resBodyBs))
+					write(d.Writer, "")
+				} else {
+					write(d.Writer, "")
+					write(d.Writer, "%s", string(responseBody))
+					write(d.Writer, "")
+				}
+			}
+		}
+	}
+
+	if err != nil {
+		write(d.Writer, "Error: %s", err)
+	}
 }
 
 type TraceInfo struct {
@@ -251,4 +283,24 @@ func write(w io.Writer, format string, args ...any) {
 		_, _ = fmt.Fprintf(w, format, args...)
 	}
 	_, _ = fmt.Fprintf(w, "\n")
+}
+
+func formatIndent(codec encoding.Codec, data []byte) (result []byte, err error) {
+	if len(data) == 0 || codec == nil {
+		return result, nil
+	}
+
+	var anyData any
+	if err = codec.Unmarshal(data, &anyData); err != nil {
+		return nil, err
+	}
+
+	switch codec.Name() {
+	case "json":
+		result, err = json.MarshalIndent(anyData, "", "    ")
+	default:
+		result, err = codec.Marshal(anyData)
+	}
+
+	return
 }

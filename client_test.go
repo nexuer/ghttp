@@ -9,11 +9,21 @@ import (
 func TestClient_Do(t *testing.T) {
 	opts := []ClientOption{
 		//WithTimeout(1 * time.Millisecond),
-		WithEndpoint("https://gitlab.com"),
+		WithEndpoint("https://gtilab.com"),
+		WithDebug(true),
+		WithNot2xxError(func() error {
+			return &gitlabErr{}
+		}),
+		//WithDebugInterface(func() DebugInterface {
+		//	return &Debug{
+		//		Trace:  false,
+		//		Writer: os.Stdout,
+		//	}
+		//}),
 	}
 	c := NewClient(opts...)
 
-	req, err := http.NewRequest(http.MethodGet, "api/v4/projects", nil)
+	req, err := http.NewRequest(http.MethodGet, "api/v4/version", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
