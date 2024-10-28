@@ -13,7 +13,8 @@ type CallOption interface {
 
 // CallOptions default call options
 type CallOptions struct {
-	Query any // URL params
+	// Set query parameters
+	Query any
 
 	// Basic auth
 	Username string
