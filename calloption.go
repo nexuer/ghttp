@@ -39,10 +39,13 @@ func (c *CallOptions) Before(request *http.Request) error {
 		if err != nil {
 			return err
 		}
-		if request.URL.RawQuery == "" {
-			request.URL.RawQuery = values.Encode()
-		} else {
-			request.URL.RawQuery += "&" + values.Encode()
+		q := values.Encode()
+		if q != "" {
+			if request.URL.RawQuery == "" {
+				request.URL.RawQuery = q
+			} else {
+				request.URL.RawQuery += "&" + q
+			}
 		}
 	}
 
