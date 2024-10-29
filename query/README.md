@@ -45,6 +45,7 @@ For slices and arrays, you can use the following options for joining:
 - `space`: Joined with " ".
 - `semicolon`: Joined with ";".
 - `brackets`: Array format, e.g., user[]=linda&user[]=liming.
+- `idx`: Array format, e.g., user[0]=linda&user[1]=liming.
 - `del`: Custom delimiter, can be any value.
 
 Nested Structs
@@ -60,6 +61,7 @@ If the `User` tag includes `query:",inline"`, the encoding would look like:
 ```
 
 ## Custom Encode
+### Encoder
 The Encoder interface allows types to implement custom encoding into URL values.
 ```go
 type Encoder interface {
@@ -81,4 +83,12 @@ func (m customEncodedStrings) EncodeValues(key string, v *url.Values) error {
 	}
 	return nil
 }
+```
+### ScopeJoiner
+A default strategy that joins strings in the format `scope[name]`.
+```go
+// Set a custom joiner
+SetScopeJoiner(func(scope, name string) string {
+    return scope + "." + name
+})
 ```

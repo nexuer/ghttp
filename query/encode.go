@@ -11,6 +11,28 @@ import (
 	"unsafe"
 )
 
+var defaultScopeJoiner ScopeJoiner = func(scope, name string) string {
+	return scope + "[" + name + "]"
+}
+
+type ScopeJoiner func(scope, name string) string
+
+func SetScopeJoiner(sj ScopeJoiner) {
+	defaultScopeJoiner = sj
+}
+
+var tags = [2]string{"query", "url"}
+
+var encoderType = reflect.TypeOf(new(Encoder)).Elem()
+
+// Encoder is an interface implemented by any type that wishes to encode
+// itself into URL values in a non-standard way.
+type Encoder interface {
+	EncodeValues(key string, v *url.Values) error
+}
+
+var timeType = reflect.TypeOf(time.Time{})
+
 // Values returns the url.Values encoding of v.
 //
 // Values expects to be passed a struct, string, map, array, or slice,
@@ -126,9 +148,11 @@ func Values(v interface{}) (url.Values, error) {
 	case []byte:
 		queryString := unsafe.String(unsafe.SliceData(str), len(str))
 		return parseQueryString(queryString)
+	case url.Values:
+		return str, nil
 	}
 
-	err := reflectValue(values, val)
+	err := reflectValue(values, val, "", 0)
 	return values, err
 }
 
@@ -136,37 +160,24 @@ func parseQueryString(queryString string) (url.Values, error) {
 	return url.ParseQuery(strings.TrimLeft(queryString, "?"))
 }
 
-func reflectValue(values url.Values, val reflect.Value) error {
+func reflectValue(values url.Values, val reflect.Value, scope string, count int) error {
+	count += 1
 	switch val.Kind() {
 	case reflect.Map:
-		return reflectMap(values, val)
+		return reflectMap(values, val, scope, count)
 	case reflect.Slice, reflect.Array:
-		l := val.Len()
-		if l == 0 {
-			return nil
-		}
-		for i := 0; i < l; i += 2 {
-			endIndex := i + 1
-
-			if endIndex > l-1 {
-				continue
-			}
-
-			key := valueString(val.Index(i), nil)
-			values.Add(key, valueString(val.Index(endIndex), nil))
-		}
+		return reflectSlice(values, val, scope, count)
 	case reflect.Struct:
-		return reflectStruct(values, val, "", 0)
+		return reflectStruct(values, val, scope, count)
 	default:
 		return fmt.Errorf("query: Values() unsupported kind input. Got %v", val.Kind())
 	}
-	return nil
 }
 
 // reflectValue populates the values parameter from the struct fields in val.
 // Embedded structs are followed recursively (using the rules defined in the
 // Values function documentation) breadth-first.
-func reflectStruct(values url.Values, val reflect.Value, scope string, l int) error {
+func reflectStruct(values url.Values, val reflect.Value, scope string, count int) error {
 	var embedded []reflect.Value
 
 	typ := val.Type()
@@ -209,7 +220,7 @@ func reflectStruct(values url.Values, val reflect.Value, scope string, l int) er
 			name = scope + "[" + name + "]"
 		}
 
-		if opts.Contains(omitemptyTagOpt) && isEmptyValue(sv) {
+		if opts.Contains("omitempty") && isEmptyValue(sv) {
 			continue
 		}
 
@@ -228,6 +239,10 @@ func reflectStruct(values url.Values, val reflect.Value, scope string, l int) er
 		}
 
 		// recursively dereference pointers. break on nil pointers
+		if sv.Kind() == reflect.Interface {
+			sv = sv.Elem()
+		}
+
 		for sv.Kind() == reflect.Ptr {
 			if sv.IsNil() {
 				break
@@ -235,11 +250,13 @@ func reflectStruct(values url.Values, val reflect.Value, scope string, l int) er
 			sv = sv.Elem()
 		}
 
-		if sv.Kind() == reflect.Interface {
-			sv = sv.Elem()
+		if sv.Type() == timeType {
+			values.Add(name, valueString(sv, opts, sf))
+			continue
 		}
 
-		if sv.Kind() == reflect.Slice || sv.Kind() == reflect.Array {
+		switch sv.Kind() {
+		case reflect.Slice, reflect.Array:
 			l := sv.Len()
 			if l == 0 {
 				// skip if slice or array is empty
@@ -256,7 +273,7 @@ func reflectStruct(values url.Values, val reflect.Value, scope string, l int) er
 			} else if opts.Contains("brackets") {
 				name = name + "[]"
 			} else {
-				del = sf.Tag.Get(delTag)
+				del = sf.Tag.Get("del")
 			}
 
 			if del != "" {
@@ -275,44 +292,41 @@ func reflectStruct(values url.Values, val reflect.Value, scope string, l int) er
 			} else {
 				for j := 0; j < l; j++ {
 					k := name
-					if opts.Contains(numberedTagOpt) {
+					if opts.Contains("numbered") {
 						k = fmt.Sprintf("%s%d", name, j)
+					} else if opts.Contains("idx") {
+						k = fmt.Sprintf("%s[%d]", name, j)
 					}
-					values.Add(k, valueString(sv.Index(j), opts, sf))
-				}
-			}
-			continue
-		}
 
-		if sv.Type() == timeType {
-			values.Add(name, valueString(sv, opts, sf))
-			continue
-		}
-
-		if sv.Kind() == reflect.Struct {
-			if ok := opts.Contains(inlineTagOpt); fieldName == "" && ok {
-				if l == 0 {
-					if err := reflectStruct(values, sv, "", l+1); err != nil {
+					already, err := handleSliceValue(values, sv, k, count)
+					if err != nil {
 						return err
 					}
+
+					if !already {
+						values.Add(k, valueString(sv.Index(j), opts, sf))
+					}
+				}
+			}
+		case reflect.Map, reflect.Struct:
+			nextScope := name
+			if ok := opts.Contains("inline"); fieldName == "" && ok {
+				if count > 1 {
+					nextScope = scope
 				} else {
-					if err := reflectStruct(values, sv, scope, l+1); err != nil {
-						return err
-					}
-				}
-			} else {
-				if err := reflectStruct(values, sv, name, l+1); err != nil {
-					return err
+					nextScope = ""
 				}
 			}
-			continue
+			if err := reflectValue(values, sv, nextScope, count); err != nil {
+				return err
+			}
+		default:
+			values.Add(name, valueString(sv, opts, sf))
 		}
-
-		values.Add(name, valueString(sv, opts))
 	}
 
 	for _, f := range embedded {
-		if err := reflectStruct(values, f, scope, l); err != nil {
+		if err := reflectValue(values, f, scope, count); err != nil {
 			return err
 		}
 	}
@@ -351,21 +365,115 @@ func isEmptyValue(v reflect.Value) bool {
 	return false
 }
 
-func reflectMap(values url.Values, val reflect.Value) error {
+func handleSliceValue(values url.Values, sv reflect.Value, scope string, count int) (bool, error) {
+	if isEmptyValue(sv) {
+		return true, nil
+	}
+	// recursively dereference pointers. break on nil pointers
+	if sv.Kind() == reflect.Interface {
+		sv = sv.Elem()
+	}
+
+	for sv.Kind() == reflect.Ptr {
+		if sv.IsNil() {
+			break
+		}
+		sv = sv.Elem()
+	}
+
+	switch sv.Kind() {
+	case reflect.Map:
+		if err := reflectMap(values, sv, scope, count+1); err != nil {
+			return false, err
+		}
+	case reflect.Slice, reflect.Array:
+		if err := reflectSlice(values, sv, scope, count+1); err != nil {
+			return false, err
+		}
+	case reflect.Struct:
+		if err := reflectStruct(values, sv, scope, count+1); err != nil {
+			return false, err
+		}
+	default:
+		return false, nil
+	}
+
+	return true, nil
+}
+
+func reflectSlice(values url.Values, val reflect.Value, scope string, count int) error {
+	l := val.Len()
+	if l == 0 {
+		return nil
+	}
+	for i := 0; i < l; i++ {
+		sv := val.Index(i)
+
+		already, err := handleSliceValue(values, sv, scope, count)
+		if err != nil {
+			return err
+		}
+
+		if already {
+			continue
+		}
+
+		endIndex := i + 1
+		if endIndex > l {
+			continue
+		}
+		if scope != "" {
+			values.Add(scope, valueString(val.Index(i), nil))
+			values.Add(scope, valueString(val.Index(endIndex), nil))
+		} else {
+			if endIndex > l-1 {
+				continue
+			}
+			key := valueString(val.Index(i), nil)
+			values.Add(key, valueString(val.Index(endIndex), nil))
+		}
+		i++
+	}
+	return nil
+}
+
+func reflectMap(values url.Values, val reflect.Value, scope string, count int) error {
 	iter := val.MapRange()
 	for iter.Next() {
-		key := valueString(iter.Key(), nil)
 		sv := iter.Value()
+		if isEmptyValue(sv) {
+			continue
+		}
 
-		// interface{}
+		key := valueString(iter.Key(), nil)
+		if scope != "" {
+			key = defaultScopeJoiner(scope, key)
+		}
+
+		// recursively dereference pointers. break on nil pointers
 		if sv.Kind() == reflect.Interface {
 			sv = sv.Elem()
 		}
 
+		for sv.Kind() == reflect.Ptr {
+			if sv.IsNil() {
+				break
+			}
+			sv = sv.Elem()
+		}
+
 		switch sv.Kind() {
+		case reflect.Map:
+			if err := reflectMap(values, sv, key, count+1); err != nil {
+				return err
+			}
 		case reflect.Slice, reflect.Array:
-			for i := 0; i < sv.Len(); i++ {
-				values.Add(key, valueString(sv.Index(i), nil))
+			if err := reflectSlice(values, sv, key, count+1); err != nil {
+				return err
+			}
+		case reflect.Struct:
+			if err := reflectStruct(values, sv, key, count+1); err != nil {
+				return err
 			}
 		default:
 			values.Add(key, valueString(sv, nil))
@@ -390,7 +498,7 @@ func valueString(v reflect.Value, opts tagOptions, sfs ...reflect.StructField) s
 	}
 
 	// query:"name,int"
-	if v.Kind() == reflect.Bool && opts.Contains(intTagOpt) {
+	if v.Kind() == reflect.Bool && opts.Contains("int") {
 		if v.Bool() {
 			return "1"
 		}
@@ -403,20 +511,20 @@ func valueString(v reflect.Value, opts tagOptions, sfs ...reflect.StructField) s
 			return ""
 		}
 		// query:"create_time,unix"
-		if opts.Contains(unixTagOpt) {
+		if opts.Contains("unix") {
 			return strconv.FormatInt(t.Unix(), 10)
 		}
 		// query:"create_time,unixmilli"
-		if opts.Contains(unixmilliTagOpt) {
+		if opts.Contains("unixmilli") {
 			return strconv.FormatInt((t.UnixNano() / 1e6), 10)
 		}
 		// query:"create_time,unixnano"
-		if opts.Contains(unixnanoTagOpt) {
+		if opts.Contains("unixnano") {
 			return strconv.FormatInt(t.UnixNano(), 10)
 		}
 
 		// query:"create_time:" layout:"2006-01-02 15:04:05"
-		if layout := sf.Tag.Get(layoutTag); layout != "" {
+		if layout := sf.Tag.Get("layout"); layout != "" {
 			return t.Format(layout)
 		}
 

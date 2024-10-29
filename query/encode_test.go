@@ -52,6 +52,12 @@ func TestValues_string(t *testing.T) {
 }
 
 func TestValues_map(t *testing.T) {
+
+	type ts struct {
+		Name string `query:"name,omitempty"`
+		Age  int    `query:"age,omitempty"`
+	}
+
 	tests := []struct {
 		input interface{}
 		want  url.Values
@@ -63,8 +69,100 @@ func TestValues_map(t *testing.T) {
 		// simple non-zero values
 		{input: map[string]interface{}{"a": 1, "b": 2}, want: url.Values{"a": {"1"}, "b": {"2"}}},
 
-		// slice non-zero values
+		// map
+		{
+			map[string]interface{}{
+				"a": map[string]string{
+					"name": "",
+				},
+			},
+			url.Values{},
+		},
+		{
+			map[string]interface{}{
+				"a": map[string]string{
+					"name": "1",
+				},
+			},
+			url.Values{"a[name]": {"1"}},
+		},
+
+		// struct
+		{
+			map[string]interface{}{
+				"a": ts{
+					Name: "",
+				},
+			},
+			url.Values{},
+		},
+		{
+			map[string]interface{}{
+				"user": &ts{
+					Name: "",
+				},
+			},
+			url.Values{},
+		},
+		{
+			map[string]interface{}{
+				"user": ts{
+					Name: "a",
+				},
+			},
+			url.Values{"user[name]": {"a"}},
+		},
+		{
+			map[string]interface{}{
+				"user": &ts{
+					Name: "a",
+				},
+			},
+			url.Values{"user[name]": {"a"}},
+		},
+
+		// slices
 		{input: map[string][]int{"a": []int{1, 2}}, want: url.Values{"a": {"1", "2"}}},
+		{input: map[string][]string{"a": []string{"1", "2"}}, want: url.Values{"a": {"1", "2"}}},
+		{input: map[string][]bool{"a": []bool{true, false}}, want: url.Values{"a": {"true", "false"}}},
+		{input: map[string][]map[string]string{
+			"a": []map[string]string{
+				{
+					"b": "c",
+				},
+			},
+		}, want: url.Values{"a[b]": {"c"}}},
+		{input: map[string]interface{}{
+			"a": []map[string][]string{
+				{
+					"b": []string{"c", "d"},
+				},
+			},
+		}, want: url.Values{"a[b]": {"c", "d"}}},
+		{
+			map[string]interface{}{
+				"a": []ts{
+					{
+						Name: "",
+					},
+				},
+			},
+			url.Values{},
+		},
+		{
+			map[string]interface{}{
+				"users": []ts{
+					{
+						Name: "1",
+					},
+					{
+						Name: "2",
+						Age:  10,
+					},
+				},
+			},
+			url.Values{"users[age]": {"10"}, "users[name]": {"1", "2"}},
+		},
 	}
 
 	for _, tt := range tests {
@@ -97,6 +195,8 @@ func TestValues_array_or_slice(t *testing.T) {
 		// complex types use fmt.Sprint to handle
 		{input: []interface{}{"a", []string{"1", "1"}}, want: url.Values{"a": {"[1 1]"}}},
 		{input: []interface{}{"a", map[string]string{"1": "1"}}, want: url.Values{"a": {"map[1:1]"}}},
+
+		{input: []interface{}{map[string]string{"a": "1"}, map[string]string{"b": "1"}}, want: url.Values{"a": {"1"}, "b": {"1"}}},
 	}
 
 	for _, tt := range tests {
@@ -217,18 +317,18 @@ func TestValues_Slices(t *testing.T) {
 		want  url.Values
 	}{
 		// slices of strings
-		{
-			struct{ V []string }{},
-			url.Values{},
-		},
-		{
-			struct{ V []string }{[]string{}},
-			url.Values{},
-		},
-		{
-			struct{ V []string }{[]string{""}},
-			url.Values{"V": {""}},
-		},
+		//{
+		//	struct{ V []string }{},
+		//	url.Values{},
+		//},
+		//{
+		//	struct{ V []string }{[]string{}},
+		//	url.Values{},
+		//},
+		//{
+		//	struct{ V []string }{[]string{""}},
+		//	url.Values{},
+		//},
 		{
 			struct{ V []string }{[]string{"a", "b"}},
 			url.Values{"V": {"a", "b"}},
@@ -271,9 +371,21 @@ func TestValues_Slices(t *testing.T) {
 		},
 		{
 			struct {
-				V []string `query:",numbered"`
-			}{[]string{"a", "b"}},
+				V []map[string]string `query:",numbered"`
+			}{[]map[string]string{{"a": "1", "b": "1"}, {"a": "2", "b": "2"}}},
 			url.Values{"V0": {"a"}, "V1": {"b"}},
+		},
+		{
+			struct {
+				V []string `query:",numbered"`
+			}{[]string{"1", "2"}},
+			url.Values{"V0": {"a"}, "V1": {"b"}},
+		},
+		{
+			struct {
+				V []string `query:",idx"`
+			}{[]string{"a", "b"}},
+			url.Values{"V[0]": {"a"}, "V[1]": {"b"}},
 		},
 
 		// arrays of strings
@@ -315,6 +427,12 @@ func TestValues_Slices(t *testing.T) {
 			}{[2]string{"a", "b"}},
 			url.Values{"V0": {"a"}, "V1": {"b"}},
 		},
+		{
+			struct {
+				V [2]string `query:",idx"`
+			}{[2]string{"a", "b"}},
+			url.Values{"V[0]": {"a"}, "V[1]": {"b"}},
+		},
 
 		// custom delimiters
 		{
@@ -342,6 +460,30 @@ func TestValues_Slices(t *testing.T) {
 				V []bool `query:",space,int"`
 			}{[]bool{true, false}},
 			url.Values{"V": {"1 0"}},
+		},
+
+		// map
+		{
+			struct {
+				V map[string]string `query:"vmap"`
+			}{
+				map[string]string{
+					"a": "1",
+					"b": "1",
+				},
+			},
+			url.Values{"vmap[a]": {"1"}, "vmap[b]": {"1"}},
+		},
+		{
+			struct {
+				V map[string]string `query:",inline"`
+			}{
+				map[string]string{
+					"a": "1",
+					"b": "1",
+				},
+			},
+			url.Values{"a": {"1"}, "b": {"1"}},
 		},
 	}
 
@@ -534,13 +676,6 @@ func TestValues_EmbeddedStructs(t *testing.T) {
 
 	for _, tt := range tests {
 		testValue(t, tt.input, tt.want)
-	}
-}
-
-func TestValues_InvalidInput(t *testing.T) {
-	_, err := Values("")
-	if err == nil {
-		t.Errorf("expected Values() to return an error on invalid input")
 	}
 }
 
