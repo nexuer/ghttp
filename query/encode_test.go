@@ -126,12 +126,19 @@ func TestValues_map(t *testing.T) {
 		{input: map[string][]string{"a": []string{"1", "2"}}, want: url.Values{"a": {"1", "2"}}},
 		{input: map[string][]bool{"a": []bool{true, false}}, want: url.Values{"a": {"true", "false"}}},
 		{input: map[string][]map[string]string{
-			"a": []map[string]string{
+			"first": []map[string]string{
 				{
-					"b": "c",
+					"a": "1",
+					"b": "1",
 				},
 			},
-		}, want: url.Values{"a[b]": {"c"}}},
+			"second": []map[string]string{
+				{
+					"a": "3",
+					"b": "4",
+				},
+			},
+		}, want: url.Values{"first[a]": {"1"}, "first[b]": {"1"}, "second[a]": {"3"}, "second[b]": {"4"}}},
 		{input: map[string]interface{}{
 			"a": []map[string][]string{
 				{
@@ -196,7 +203,10 @@ func TestValues_array_or_slice(t *testing.T) {
 		{input: []interface{}{"a", []string{"1", "1"}}, want: url.Values{"a": {"[1 1]"}}},
 		{input: []interface{}{"a", map[string]string{"1": "1"}}, want: url.Values{"a": {"map[1:1]"}}},
 
-		{input: []interface{}{map[string]string{"a": "1"}, map[string]string{"b": "1"}}, want: url.Values{"a": {"1"}, "b": {"1"}}},
+		{input: []interface{}{
+			map[string]string{"a": "1", "b": "2"},
+			map[string]string{"a": "3", "b": "4"},
+		}, want: url.Values{"a": {"1", "3"}, "b": {"2", "4"}}},
 	}
 
 	for _, tt := range tests {
@@ -209,7 +219,7 @@ func TestValues_BasicTypes(t *testing.T) {
 		input interface{}
 		want  url.Values
 	}{
-		// zero values
+		//zero values
 		{struct{ V string }{}, url.Values{"V": {""}}},
 		{struct{ V int }{}, url.Values{"V": {"0"}}},
 		{struct{ V uint }{}, url.Values{"V": {"0"}}},
@@ -264,9 +274,78 @@ func TestValues_BasicTypes(t *testing.T) {
 		},
 		{
 			struct {
-				V time.Time `layout:"2006-01-02"`
-			}{time.Date(2000, 1, 1, 12, 34, 56, 0, time.UTC)},
-			url.Values{"V": {"2000-01-01"}},
+				Date    time.Time `query:"date" layout:"2006-01-02"`
+				Time    time.Time `query:"time" layout:"2006-01-02 15:04:05"`
+				ISO8601 time.Time `query:"iso8601" layout:"2006-01-02T15:04:05.000Z07:00"`
+			}{
+				time.Date(2000, 1, 1, 12, 34, 56, 0, time.UTC),
+				time.Date(2000, 1, 1, 12, 34, 56, 0, time.UTC),
+				time.Date(2000, 1, 1, 12, 34, 56, int(time.Millisecond*20), time.UTC),
+			},
+			url.Values{"date": {"2000-01-01"}, "time": {"2000-01-01 12:34:56"}, "iso8601": {"2000-01-01T12:34:56.020Z"}},
+		},
+	}
+
+	for _, tt := range tests {
+		testValue(t, tt.input, tt.want)
+	}
+}
+
+func TestValues_time(t *testing.T) {
+	var zeroTime time.Time
+	tests := []struct {
+		input interface{}
+		want  url.Values
+	}{
+		// string
+		{input: zeroTime, want: url.Values{}},
+		// map
+		{input: map[string]time.Time{
+			"start": time.Date(2000, 1, 1, 12, 34, 56, 0, time.UTC),
+			"end":   time.Date(2000, 1, 1, 13, 34, 56, 0, time.UTC),
+		}, want: url.Values{"start": {"2000-01-01T12:34:56Z"}, "end": {"2000-01-01T13:34:56Z"}}},
+
+		// slices
+		{input: []interface{}{
+			time.Date(2000, 1, 1, 12, 34, 56, 0, time.UTC),
+			time.Date(2000, 1, 1, 13, 34, 56, 0, time.UTC),
+		}, want: url.Values{"2000-01-01T12:34:56Z": {"2000-01-01T13:34:56Z"}}},
+
+		// struct
+		{
+			struct {
+				Date    time.Time `query:"date" layout:"2006-01-02"`
+				Time    time.Time `query:"time" layout:"2006-01-02 15:04:05"`
+				ISO8601 time.Time `query:"iso8601" layout:"2006-01-02T15:04:05.000Z07:00"`
+			}{
+				time.Date(2000, 1, 1, 12, 34, 56, 0, time.UTC),
+				time.Date(2000, 1, 1, 12, 34, 56, 0, time.UTC),
+				time.Date(2000, 1, 1, 12, 34, 56, int(time.Millisecond*20), time.UTC),
+			},
+			url.Values{"date": {"2000-01-01"}, "time": {"2000-01-01 12:34:56"}, "iso8601": {"2000-01-01T12:34:56.020Z"}},
+		},
+		{
+			struct {
+				Times []time.Time `query:"times" layout:"2006-01-02"`
+			}{
+				Times: []time.Time{
+					time.Date(2000, 1, 1, 12, 34, 56, 0, time.UTC),
+					time.Date(2000, 1, 1, 12, 34, 56, 0, time.UTC),
+					time.Date(2000, 1, 1, 12, 34, 56, int(time.Millisecond*20), time.UTC),
+				},
+			},
+			url.Values{"times": {"2000-01-01", "2000-01-01", "2000-01-01"}},
+		},
+		{
+			struct {
+				Times map[string]time.Time `query:"times" layout:"2006-01-02"`
+			}{
+				Times: map[string]time.Time{
+					"date":  time.Date(2000, 1, 1, 12, 34, 56, 0, time.UTC),
+					"date1": time.Date(2000, 1, 1, 12, 34, 56, int(time.Millisecond*20), time.UTC),
+				},
+			},
+			url.Values{"times[date]": {"2000-01-01"}, "times[date1]": {"2000-01-01"}},
 		},
 	}
 
@@ -317,18 +396,18 @@ func TestValues_Slices(t *testing.T) {
 		want  url.Values
 	}{
 		// slices of strings
-		//{
-		//	struct{ V []string }{},
-		//	url.Values{},
-		//},
-		//{
-		//	struct{ V []string }{[]string{}},
-		//	url.Values{},
-		//},
-		//{
-		//	struct{ V []string }{[]string{""}},
-		//	url.Values{},
-		//},
+		{
+			struct{ V []string }{},
+			url.Values{},
+		},
+		{
+			struct{ V []string }{[]string{}},
+			url.Values{},
+		},
+		{
+			struct{ V []string }{[]string{""}},
+			url.Values{},
+		},
 		{
 			struct{ V []string }{[]string{"a", "b"}},
 			url.Values{"V": {"a", "b"}},
@@ -371,27 +450,35 @@ func TestValues_Slices(t *testing.T) {
 		},
 		{
 			struct {
-				V []map[string]string `query:",numbered"`
-			}{[]map[string]string{{"a": "1", "b": "1"}, {"a": "2", "b": "2"}}},
-			url.Values{"V0": {"a"}, "V1": {"b"}},
-		},
-		{
-			struct {
 				V []string `query:",numbered"`
-			}{[]string{"1", "2"}},
+			}{[]string{"a", "b"}},
 			url.Values{"V0": {"a"}, "V1": {"b"}},
 		},
+		{input: struct {
+			V []map[string]string `query:",numbered"`
+		}{[]map[string]string{
+			map[string]string{"a": "1", "b": "2"},
+			map[string]string{"a": "3", "b": "4"},
+		},
+		}, want: url.Values{"V0[a]": {"1"}, "V0[b]": {"2"}, "V1[a]": {"3"}, "V1[b]": {"4"}}},
 		{
 			struct {
 				V []string `query:",idx"`
 			}{[]string{"a", "b"}},
 			url.Values{"V[0]": {"a"}, "V[1]": {"b"}},
 		},
+		{input: struct {
+			V []map[string]string `query:",idx"`
+		}{[]map[string]string{
+			map[string]string{"a": "1", "b": "2"},
+			map[string]string{"a": "3", "b": "4"},
+		},
+		}, want: url.Values{"V[0][a]": {"1"}, "V[0][b]": {"2"}, "V[1][a]": {"3"}, "V[1][b]": {"4"}}},
 
 		// arrays of strings
 		{
 			struct{ V [2]string }{},
-			url.Values{"V": {"", ""}},
+			url.Values{},
 		},
 		{
 			struct{ V [2]string }{[2]string{"a", "b"}},
@@ -484,6 +571,122 @@ func TestValues_Slices(t *testing.T) {
 				},
 			},
 			url.Values{"a": {"1"}, "b": {"1"}},
+		},
+	}
+
+	for _, tt := range tests {
+		testValue(t, tt.input, tt.want)
+	}
+}
+
+func TestValues_inline(t *testing.T) {
+	type in struct {
+		Val string `query:"val"`
+		Key string `query:"key"`
+	}
+
+	type inin struct {
+		In in `query:",inline"`
+	}
+
+	type outin struct {
+		In in `query:"out"`
+	}
+
+	tests := []struct {
+		input interface{}
+		want  url.Values
+	}{
+		// map
+		{
+			struct {
+				Name  string                 `query:"name"`
+				Pages map[string]interface{} `query:",inline"`
+			}{Pages: map[string]interface{}{"a": "1", "b": "2"}},
+			url.Values{"name": {""}, "a": {"1"}, "b": {"2"}},
+		},
+		{
+			struct {
+				Name  string                 `query:"name"`
+				Pages map[string]interface{} `query:",inline"`
+				Sets  map[string]interface{} `query:"sets"`
+			}{Pages: map[string]interface{}{"a": "1", "b": "2"}, Sets: map[string]interface{}{"a": "3", "b": "4"}},
+			url.Values{"name": {""}, "a": {"1"}, "b": {"2"}, "sets[a]": {"3"}, "sets[b]": {"4"}},
+		},
+		{
+			struct {
+				Name   string          `query:"name"`
+				Inline map[string]inin `query:",inline"`
+				In     in              `query:",inline"`
+				InRaw  in              `query:"in"`
+				Out    outin           `query:",inline"`
+				OutRaw outin           `query:"out"`
+			}{
+				Name:   "myName",
+				Inline: map[string]inin{"inline": inin{}},
+			},
+			url.Values{
+				"name":          {"myName"},
+				"key":           {""},
+				"val":           {""},
+				"inline[key]":   {""},
+				"inline[val]":   {""},
+				"in[key]":       {""},
+				"in[val]":       {""},
+				"out[key]":      {""},
+				"out[val]":      {""},
+				"out[out][key]": {""},
+				"out[out][val]": {""},
+			},
+		},
+		{
+			struct {
+				Name      string `query:"name"`
+				Ins       []inin `query:"ins"`
+				InsIdx    []inin `query:"ins_idx,idx"`
+				InsNumber []inin `query:"ins_num,numbered"`
+			}{
+				Name:      "myName",
+				Ins:       []inin{{}, {}},
+				InsIdx:    []inin{{}, {}},
+				InsNumber: []inin{{}, {}},
+			},
+			url.Values{
+				"name":            {"myName"},
+				"ins[key]":        {"", ""},
+				"ins[val]":        {"", ""},
+				"ins_idx[0][val]": {""},
+				"ins_idx[0][key]": {""},
+				"ins_idx[1][val]": {""},
+				"ins_idx[1][key]": {""},
+				"ins_num0[val]":   {""},
+				"ins_num0[key]":   {""},
+				"ins_num1[val]":   {""},
+				"ins_num1[key]":   {""},
+			},
+		},
+		//
+		// struct
+		{
+			struct {
+				Name   string `query:"name"`
+				Pages  in     `query:",inline"`
+				Inline *inin  `query:",inline,omitempty"`
+			}{Pages: in{Key: "1"}, Inline: nil},
+			url.Values{"key": {"1"}, "name": {""}, "val": {""}},
+		},
+		{
+			struct {
+				Name    string `query:"name"`
+				Pages   in     `query:",inline"`
+				Inline  *inin  `query:",inline,omitempty"`
+				Outline inin   `query:"outline"`
+			}{
+				Pages:   in{Key: "1"},
+				Inline:  &inin{in{}},
+				Outline: inin{in{}},
+			},
+			url.Values{"key": {"1", ""}, "name": {""}, "val": {"", ""}, "outline[key]": {""}, "outline[val]": {""}},
 		},
 	}
 
@@ -975,7 +1178,7 @@ func TestIsEmptyValue(t *testing.T) {
 }
 
 func TestParseTag(t *testing.T) {
-	name, opts := parseTag("field,foobar,foo")
+	name, opts := parseTag("field,foobar,foo", reflect.StructField{})
 	if name != "field" {
 		t.Fatalf("name = %q, want field", name)
 	}
@@ -988,7 +1191,7 @@ func TestParseTag(t *testing.T) {
 		{"bar", false},
 		{"field", false},
 	} {
-		if opts.Contains(tt.opt) != tt.want {
+		if opts.contains(tt.opt) != tt.want {
 			t.Errorf("Contains(%q) = %v", tt.opt, !tt.want)
 		}
 	}

@@ -8,7 +8,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unsafe"
 )
 
 var defaultScopeJoiner ScopeJoiner = func(scope, name string) string {
@@ -146,13 +145,12 @@ func Values(v interface{}) (url.Values, error) {
 	case string:
 		return parseQueryString(str)
 	case []byte:
-		queryString := unsafe.String(unsafe.SliceData(str), len(str))
-		return parseQueryString(queryString)
+		return parseQueryString(string(str))
 	case url.Values:
 		return str, nil
 	}
 
-	err := reflectValue(values, val, "", 0)
+	err := reflectValue(values, val)
 	return values, err
 }
 
@@ -160,15 +158,14 @@ func parseQueryString(queryString string) (url.Values, error) {
 	return url.ParseQuery(strings.TrimLeft(queryString, "?"))
 }
 
-func reflectValue(values url.Values, val reflect.Value, scope string, count int) error {
-	count += 1
+func reflectValue(values url.Values, val reflect.Value) error {
 	switch val.Kind() {
 	case reflect.Map:
-		return reflectMap(values, val, scope, count)
+		return reflectMap(values, val, "", 0, nil)
 	case reflect.Slice, reflect.Array:
-		return reflectSlice(values, val, scope, count)
+		return reflectSlice(values, val, "", 0, nil)
 	case reflect.Struct:
-		return reflectStruct(values, val, scope, count)
+		return reflectStruct(values, val, "", 0)
 	default:
 		return fmt.Errorf("query: Values() unsupported kind input. Got %v", val.Kind())
 	}
@@ -186,10 +183,8 @@ func reflectStruct(values url.Values, val reflect.Value, scope string, count int
 		if sf.PkgPath != "" && !sf.Anonymous { // unexported
 			continue
 		}
-
-		sv := val.Field(i)
-
-		var tag string
+		// reset tag
+		tag := ""
 		for _, tn := range tags {
 			tag = sf.Tag.Get(tn)
 			if tag != "" {
@@ -201,8 +196,8 @@ func reflectStruct(values url.Values, val reflect.Value, scope string, count int
 			continue
 		}
 
-		fieldName, opts := parseTag(tag)
-
+		sv := val.Field(i)
+		fieldName, opts := parseTag(tag, sf)
 		name := fieldName
 		if name == "" {
 			if sf.Anonymous {
@@ -213,6 +208,7 @@ func reflectStruct(values url.Values, val reflect.Value, scope string, count int
 					continue
 				}
 			}
+
 			name = sf.Name
 		}
 
@@ -220,7 +216,7 @@ func reflectStruct(values url.Values, val reflect.Value, scope string, count int
 			name = scope + "[" + name + "]"
 		}
 
-		if opts.Contains("omitempty") && isEmptyValue(sv) {
+		if opts.contains("omitempty") && isEmptyValue(sv) {
 			continue
 		}
 
@@ -250,8 +246,9 @@ func reflectStruct(values url.Values, val reflect.Value, scope string, count int
 			sv = sv.Elem()
 		}
 
+		// handle special types
 		if sv.Type() == timeType {
-			values.Add(name, valueString(sv, opts, sf))
+			values.Add(name, valueString(sv, opts))
 			continue
 		}
 
@@ -264,13 +261,13 @@ func reflectStruct(values url.Values, val reflect.Value, scope string, count int
 			}
 
 			var del string
-			if opts.Contains("comma") {
+			if opts.contains("comma") {
 				del = ","
-			} else if opts.Contains("space") {
+			} else if opts.contains("space") {
 				del = " "
-			} else if opts.Contains("semicolon") {
+			} else if opts.contains("semicolon") {
 				del = ";"
-			} else if opts.Contains("brackets") {
+			} else if opts.contains("brackets") {
 				name = name + "[]"
 			} else {
 				del = sf.Tag.Get("del")
@@ -286,47 +283,54 @@ func reflectStruct(values url.Values, val reflect.Value, scope string, count int
 						s.WriteString(del)
 					}
 
-					s.WriteString(valueString(sv.Index(j), opts, sf))
+					s.WriteString(valueString(sv.Index(j), opts))
 				}
 				values.Add(name, s.String())
 			} else {
 				for j := 0; j < l; j++ {
 					k := name
-					if opts.Contains("numbered") {
+					if opts.contains("numbered") {
 						k = fmt.Sprintf("%s%d", name, j)
-					} else if opts.Contains("idx") {
+					} else if opts.contains("idx") {
 						k = fmt.Sprintf("%s[%d]", name, j)
 					}
 
-					already, err := handleSliceValue(values, sv, k, count)
+					already, err := handleSliceValue(values, sv.Index(j), k, count, opts)
 					if err != nil {
 						return err
 					}
 
 					if !already {
-						values.Add(k, valueString(sv.Index(j), opts, sf))
+						values.Add(k, valueString(sv.Index(j), opts))
 					}
 				}
 			}
 		case reflect.Map, reflect.Struct:
 			nextScope := name
-			if ok := opts.Contains("inline"); fieldName == "" && ok {
-				if count > 1 {
+			if ok := opts.contains("inline"); fieldName == "" && ok {
+				if count > 0 {
 					nextScope = scope
 				} else {
 					nextScope = ""
 				}
 			}
-			if err := reflectValue(values, sv, nextScope, count); err != nil {
-				return err
+			if sv.Kind() == reflect.Map {
+				if err := reflectMap(values, sv, nextScope, count+1, opts); err != nil {
+					return err
+				}
+			} else {
+				if err := reflectStruct(values, sv, nextScope, count+1); err != nil {
+					return err
+				}
 			}
+
 		default:
-			values.Add(name, valueString(sv, opts, sf))
+			values.Add(name, valueString(sv, opts))
 		}
 	}
 
 	for _, f := range embedded {
-		if err := reflectValue(values, f, scope, count); err != nil {
+		if err := reflectStruct(values, f, scope, count); err != nil {
 			return err
 		}
 	}
@@ -365,7 +369,7 @@ func isEmptyValue(v reflect.Value) bool {
 	return false
 }
 
-func handleSliceValue(values url.Values, sv reflect.Value, scope string, count int) (bool, error) {
+func handleSliceValue(values url.Values, sv reflect.Value, scope string, count int, opts *tagOptions) (bool, error) {
 	if isEmptyValue(sv) {
 		return true, nil
 	}
@@ -383,14 +387,17 @@ func handleSliceValue(values url.Values, sv reflect.Value, scope string, count i
 
 	switch sv.Kind() {
 	case reflect.Map:
-		if err := reflectMap(values, sv, scope, count+1); err != nil {
+		if err := reflectMap(values, sv, scope, count+1, opts); err != nil {
 			return false, err
 		}
 	case reflect.Slice, reflect.Array:
-		if err := reflectSlice(values, sv, scope, count+1); err != nil {
+		if err := reflectSlice(values, sv, scope, count+1, opts); err != nil {
 			return false, err
 		}
 	case reflect.Struct:
+		if sv.Type() == timeType {
+			return false, nil
+		}
 		if err := reflectStruct(values, sv, scope, count+1); err != nil {
 			return false, err
 		}
@@ -401,7 +408,7 @@ func handleSliceValue(values url.Values, sv reflect.Value, scope string, count i
 	return true, nil
 }
 
-func reflectSlice(values url.Values, val reflect.Value, scope string, count int) error {
+func reflectSlice(values url.Values, val reflect.Value, scope string, count int, opts *tagOptions) error {
 	l := val.Len()
 	if l == 0 {
 		return nil
@@ -409,7 +416,7 @@ func reflectSlice(values url.Values, val reflect.Value, scope string, count int)
 	for i := 0; i < l; i++ {
 		sv := val.Index(i)
 
-		already, err := handleSliceValue(values, sv, scope, count)
+		already, err := handleSliceValue(values, sv, scope, count, opts)
 		if err != nil {
 			return err
 		}
@@ -423,13 +430,13 @@ func reflectSlice(values url.Values, val reflect.Value, scope string, count int)
 			continue
 		}
 		if scope != "" {
-			values.Add(scope, valueString(val.Index(i), nil))
+			values.Add(scope, valueString(sv, nil))
 			values.Add(scope, valueString(val.Index(endIndex), nil))
 		} else {
 			if endIndex > l-1 {
 				continue
 			}
-			key := valueString(val.Index(i), nil)
+			key := valueString(sv, nil)
 			values.Add(key, valueString(val.Index(endIndex), nil))
 		}
 		i++
@@ -437,7 +444,7 @@ func reflectSlice(values url.Values, val reflect.Value, scope string, count int)
 	return nil
 }
 
-func reflectMap(values url.Values, val reflect.Value, scope string, count int) error {
+func reflectMap(values url.Values, val reflect.Value, scope string, count int, opts *tagOptions) error {
 	iter := val.MapRange()
 	for iter.Next() {
 		sv := iter.Value()
@@ -454,7 +461,6 @@ func reflectMap(values url.Values, val reflect.Value, scope string, count int) e
 		if sv.Kind() == reflect.Interface {
 			sv = sv.Elem()
 		}
-
 		for sv.Kind() == reflect.Ptr {
 			if sv.IsNil() {
 				break
@@ -462,13 +468,18 @@ func reflectMap(values url.Values, val reflect.Value, scope string, count int) e
 			sv = sv.Elem()
 		}
 
+		if sv.Type() == timeType {
+			values.Add(key, valueString(sv, opts))
+			continue
+		}
+
 		switch sv.Kind() {
 		case reflect.Map:
-			if err := reflectMap(values, sv, key, count+1); err != nil {
+			if err := reflectMap(values, sv, key, count+1, opts); err != nil {
 				return err
 			}
 		case reflect.Slice, reflect.Array:
-			if err := reflectSlice(values, sv, key, count+1); err != nil {
+			if err := reflectSlice(values, sv, key, count+1, opts); err != nil {
 				return err
 			}
 		case reflect.Struct:
@@ -476,7 +487,7 @@ func reflectMap(values url.Values, val reflect.Value, scope string, count int) e
 				return err
 			}
 		default:
-			values.Add(key, valueString(sv, nil))
+			values.Add(key, valueString(sv, opts))
 		}
 
 	}
@@ -484,7 +495,11 @@ func reflectMap(values url.Values, val reflect.Value, scope string, count int) e
 }
 
 // valueString returns the string representation of a value
-func valueString(v reflect.Value, opts tagOptions, sfs ...reflect.StructField) string {
+func valueString(v reflect.Value, opts *tagOptions) string {
+	if v.Kind() == reflect.Interface {
+		v = v.Elem()
+	}
+
 	for v.Kind() == reflect.Ptr {
 		if v.IsNil() {
 			return ""
@@ -492,63 +507,65 @@ func valueString(v reflect.Value, opts tagOptions, sfs ...reflect.StructField) s
 		v = v.Elem()
 	}
 
-	var sf reflect.StructField
-	if len(sfs) > 0 {
-		sf = sfs[0]
+	if v.Type() == timeType {
+		t := v.Interface().(time.Time)
+		if t.IsZero() {
+			return ""
+		}
+
+		if opts != nil {
+			// query:"create_time,unix"
+			if opts.contains("unix") {
+				return strconv.FormatInt(t.Unix(), 10)
+			}
+			// query:"create_time,unixmilli"
+			if opts.contains("unixmilli") {
+				return strconv.FormatInt(t.UnixNano()/1e6, 10)
+			}
+			// query:"create_time,unixnano"
+			if opts.contains("unixnano") {
+				return strconv.FormatInt(t.UnixNano(), 10)
+			}
+			// query:"create_time:" layout:"2006-01-02 15:04:05"
+			if layout := opts.sf.Tag.Get("layout"); layout != "" {
+				return t.Format(layout)
+			}
+		}
+		return t.Format(time.RFC3339)
 	}
 
 	// query:"name,int"
-	if v.Kind() == reflect.Bool && opts.Contains("int") {
+	if opts != nil && v.Kind() == reflect.Bool && opts.contains("int") {
 		if v.Bool() {
 			return "1"
 		}
 		return "0"
 	}
 
-	if v.Type() == timeType {
-		t := v.Interface().(time.Time)
-		if t.IsZero() {
-			return ""
-		}
-		// query:"create_time,unix"
-		if opts.Contains("unix") {
-			return strconv.FormatInt(t.Unix(), 10)
-		}
-		// query:"create_time,unixmilli"
-		if opts.Contains("unixmilli") {
-			return strconv.FormatInt((t.UnixNano() / 1e6), 10)
-		}
-		// query:"create_time,unixnano"
-		if opts.Contains("unixnano") {
-			return strconv.FormatInt(t.UnixNano(), 10)
-		}
-
-		// query:"create_time:" layout:"2006-01-02 15:04:05"
-		if layout := sf.Tag.Get("layout"); layout != "" {
-			return t.Format(layout)
-		}
-
-		return t.Format(time.RFC3339)
-	}
-
 	// bytes to string
 	if b, ok := v.Interface().([]byte); ok {
-		return unsafe.String(unsafe.SliceData(b), len(b))
+		return string(b)
 	}
 
 	return fmt.Sprint(v.Interface())
 }
 
-// tagOptions is the string following a comma in a struct field's "query" tag, or
+// tagOptions is the string following a comma in a struct field's "query" "url" tag, or
 // the empty string. It does not include the leading comma.
-type tagOptions map[string]string
+type tagOptions struct {
+	kvs map[string]string
+	sf  reflect.StructField
+}
 
 // parseTag splits a struct field's url tag into its name and comma-separated
 // options.
-func parseTag(tag string) (string, tagOptions) {
+func parseTag(tag string, sf reflect.StructField) (string, *tagOptions) {
 	s := strings.Split(tag, ",")
 	opts := s[1:]
-	tagOpts := make(tagOptions)
+	tagOpts := &tagOptions{
+		kvs: make(map[string]string),
+		sf:  sf,
+	}
 	if len(opts) > 0 {
 		for _, v := range opts {
 			if v == "" {
@@ -558,24 +575,24 @@ func parseTag(tag string) (string, tagOptions) {
 			if len(keys) == 0 {
 				continue
 			}
-			tagOpts[keys[0]] = strings.Join(keys[1:], ":")
+			tagOpts.kvs[keys[0]] = strings.Join(keys[1:], ":")
 		}
 	}
 	return s[0], tagOpts
 }
 
-// Contains checks whether the tagOptions contains the specified option.
-func (o tagOptions) Contains(option string) bool {
+// contains checks whether the tagOptions contains the specified option.
+func (o *tagOptions) contains(option string) bool {
 	if o == nil {
 		return false
 	}
-	_, ok := o[option]
+	_, ok := o.kvs[option]
 	return ok
 }
 
-func (o tagOptions) Get(option string) string {
+func (o *tagOptions) get(option string) string {
 	if o == nil {
 		return ""
 	}
-	return o[option]
+	return o.kvs[option]
 }
