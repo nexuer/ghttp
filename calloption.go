@@ -1,10 +1,14 @@
 package ghttp
 
 import (
-	"net/http"
-
+	"context"
 	"github.com/nexuer/ghttp/query"
+	"net/http"
 )
+
+type Limiter interface {
+	Wait(ctx context.Context) error
+}
 
 type CallOption interface {
 	Before(request *http.Request) error

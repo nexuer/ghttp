@@ -28,6 +28,16 @@ type clientOptions struct {
 	debugInterface func() DebugInterface
 	debug          bool
 	not2xxError    func() error
+	limiter        Limiter
+}
+
+// WithLimiter sets a rate limiter for the client.
+// This limiter will be applied to control the number of requests made
+// to the server, ensuring that the requests stay within the specified limits.
+func WithLimiter(l Limiter) ClientOption {
+	return func(c *clientOptions) {
+		c.limiter = l
+	}
 }
 
 // WithNot2xxError handle response status code < 200 and code > 299
@@ -190,6 +200,12 @@ func (c *Client) Invoke(ctx context.Context, method, path string, args any, repl
 	ctx, cancel, _ = c.setTimeout(ctx)
 	defer cancel()
 
+	if c.opts.limiter != nil {
+		if err := c.opts.limiter.Wait(ctx); err != nil {
+			return nil, err
+		}
+	}
+
 	// marshal request body
 	if args != nil {
 		codec := defaultContentType.get(c.contentSubType)
@@ -208,7 +224,7 @@ func (c *Client) Invoke(ctx context.Context, method, path string, args any, repl
 		return nil, err
 	}
 
-	response, err := c.Do(req, opts...)
+	response, err := c.do(req, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -226,15 +242,28 @@ func (c *Client) Do(req *http.Request, opts ...CallOption) (*http.Response, erro
 		return nil, errors.New("http: nil http request")
 	}
 
-	// First set the default header, the user can overwrite
-	c.setHeader(req)
-
 	// set timeout
 	ctx, cancel, ok := c.setTimeout(req.Context())
 	if ok {
 		defer cancel()
 		req = req.WithContext(ctx)
 	}
+
+	if c.opts.limiter != nil {
+		if err := c.opts.limiter.Wait(ctx); err != nil {
+			return nil, err
+		}
+	}
+	return c.do(req, opts...)
+}
+
+func (c *Client) do(req *http.Request, opts ...CallOption) (*http.Response, error) {
+	if req == nil {
+		return nil, errors.New("http: nil http request")
+	}
+
+	// First set the default header, the user can overwrite
+	c.setHeader(req)
 
 	// set default endpoint
 	if c.opts.endpoint != "" {

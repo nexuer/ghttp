@@ -8,9 +8,6 @@ go get github.com/nexuer/ghttp
 ## Usage
 
 ### Options
-> Note: For rate limiting and retry mechanisms, please use external libraries.
-> This keeps ghttp focused on making HTTP calls, maintaining simplicity and clarity in its design.
-
 #### Configure the HTTP RoundTripper
 
 `WithTransport(trans http.RoundTripper)`
@@ -53,6 +50,9 @@ _, err := client.Invoke(ctx, http.MethodGet, "/api/v4/projects", nil, nil)
 
 #### Enable Debugging
 `WithDebug(open bool)`
+
+#### Set Limiter
+`WithLimiter(l Limiter)`
 
 ### Invocation Methods
 
