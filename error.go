@@ -65,3 +65,11 @@ func IsTimeout(err error) bool {
 	}
 	return errors.Is(err, context.DeadlineExceeded)
 }
+
+func StatusForErr(err error) (int, bool) {
+	var e *Error
+	if errors.As(err, &e) {
+		return e.StatusCode, true
+	}
+	return 0, false
+}
