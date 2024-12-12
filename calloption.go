@@ -74,6 +74,25 @@ func (b basicAuthCallOption) After(response *http.Response) error {
 	return nil
 }
 
+func BearerToken(token string) CallOption {
+	return bearerTokenCallOption{token}
+}
+
+type bearerTokenCallOption struct {
+	token string
+}
+
+func (b bearerTokenCallOption) Before(request *http.Request) error {
+	if b.token != "" {
+		request.Header.Set("Authorization", "Bearer "+b.token)
+	}
+	return nil
+}
+
+func (b bearerTokenCallOption) After(response *http.Response) error {
+	return nil
+}
+
 // CallOptions default call options
 type CallOptions struct {
 	// Set query parameters

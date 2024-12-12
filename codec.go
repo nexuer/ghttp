@@ -6,6 +6,7 @@ import (
 
 	"github.com/nexuer/ghttp/encoding"
 	"github.com/nexuer/ghttp/encoding/json"
+	"github.com/nexuer/ghttp/encoding/plain"
 	"github.com/nexuer/ghttp/encoding/proto"
 	"github.com/nexuer/ghttp/encoding/xml"
 	"github.com/nexuer/ghttp/encoding/yaml"
@@ -21,6 +22,7 @@ var defaultContentType = &contentType{
 		"xml":        xml.Name,
 		"x-yaml":     yaml.Name,
 		"yaml":       yaml.Name,
+		"plain":      plain.Name,
 	},
 }
 

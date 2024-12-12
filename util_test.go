@@ -39,6 +39,10 @@ func TestSubContentType(t *testing.T) {
 			contentType: "application/vnd.docker.distribution.manifest.v2+json; charset=utf-8",
 			want:        "json",
 		},
+		{
+			contentType: "text/plain; charset=utf-8",
+			want:        "plain",
+		},
 	}
 
 	for _, v := range tests {

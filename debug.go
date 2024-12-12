@@ -133,7 +133,6 @@ func (d *Debug) After(request *http.Request, response *http.Response, err error)
 			if len(reqBodyBs) > 0 {
 				write(d.Writer, "")
 				write(d.Writer, "%s", string(reqBodyBs))
-				write(d.Writer, "")
 			}
 		}
 	} else {
@@ -141,6 +140,7 @@ func (d *Debug) After(request *http.Request, response *http.Response, err error)
 	}
 
 	if response != nil {
+		write(d.Writer, "")
 		// response
 		write(d.Writer, "< %s %s", response.Proto, response.Status)
 		for k, v := range response.Header {
@@ -156,18 +156,17 @@ func (d *Debug) After(request *http.Request, response *http.Response, err error)
 				if len(resBodyBs) > 0 {
 					write(d.Writer, "")
 					write(d.Writer, "%s", string(resBodyBs))
-					write(d.Writer, "")
 				} else {
 					write(d.Writer, "")
 					write(d.Writer, "%s", string(responseBody))
-					write(d.Writer, "")
 				}
 			}
 		}
 	}
 
 	if err != nil {
-		write(d.Writer, "Error: %s", err)
+		write(d.Writer, "")
+		write(d.Writer, "** ERROR: %s", err)
 	}
 }
 
@@ -292,7 +291,7 @@ func formatIndent(codec encoding.Codec, data []byte) (result []byte, err error) 
 
 	var anyData any
 	if err = codec.Unmarshal(data, &anyData); err != nil {
-		return nil, err
+		return data, err
 	}
 
 	switch codec.Name() {
