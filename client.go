@@ -302,7 +302,7 @@ func (c *Client) do(req *http.Request, opts ...CallOption) (*http.Response, erro
 }
 
 func (c *Client) bindNot2xxError(response *http.Response) error {
-	if !Not2xxCode(response.StatusCode) || c.opts.not2xxError == nil {
+	if !not2xxCode(response.StatusCode) || c.opts.not2xxError == nil {
 		return nil
 	}
 	// new not2xxError
