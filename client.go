@@ -203,7 +203,7 @@ func (c *Client) Invoke(ctx context.Context, method, path string, args any, repl
 	}
 
 	// marshal request body
-	body, ct, err := c.body(args)
+	body, ct, err := c.Body(args)
 	if err != nil {
 		return nil, err
 	}
@@ -318,7 +318,7 @@ func (c *Client) bindNot2xxError(response *http.Response) error {
 	return not2xxError
 }
 
-func (c *Client) body(body any, contentType ...string) (io.Reader, string, error) {
+func (c *Client) Body(body any, contentType ...string) (io.Reader, string, error) {
 	ct := c.opts.contentType
 	cst := c.contentSubType
 	if len(contentType) > 0 && len(contentType[0]) > 0 {
