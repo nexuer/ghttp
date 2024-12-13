@@ -3,8 +3,6 @@ package ghttp
 import (
 	"context"
 	"net/http"
-
-	"github.com/nexuer/ghttp/query"
 )
 
 type Limiter interface {
@@ -16,27 +14,6 @@ type CallOption interface {
 	After(response *http.Response) error
 }
 
-func setQuery(req *http.Request, q any) error {
-	if q == nil {
-		return nil
-	}
-	values, err := query.Values(q)
-	if err != nil {
-		return err
-	}
-	queryStr := values.Encode()
-	if queryStr == "" {
-		return nil
-	}
-
-	if req.URL.RawQuery == "" {
-		req.URL.RawQuery = queryStr
-	} else {
-		req.URL.RawQuery += "&" + queryStr
-	}
-	return nil
-}
-
 func Query(q any) CallOption {
 	return queryCallOption{query: q}
 }
@@ -46,7 +23,7 @@ type queryCallOption struct {
 }
 
 func (q queryCallOption) Before(request *http.Request) error {
-	return setQuery(request, q.query)
+	return SetQuery(request, q.query)
 }
 
 func (q queryCallOption) After(response *http.Response) error {
@@ -162,7 +139,7 @@ func (c *CallOptions) Before(request *http.Request) error {
 		}
 	}
 
-	if err := setQuery(request, c.Query); err != nil {
+	if err := SetQuery(request, c.Query); err != nil {
 		return err
 	}
 

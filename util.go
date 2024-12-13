@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+
+	"github.com/nexuer/ghttp/query"
 )
 
 func subContentType(contentType string) string {
@@ -82,4 +84,25 @@ func joinPath(endpoint, path string) string {
 	}
 
 	return fullPath
+}
+
+func SetQuery(req *http.Request, q any) error {
+	if q == nil {
+		return nil
+	}
+	values, err := query.Values(q)
+	if err != nil {
+		return err
+	}
+	queryStr := values.Encode()
+	if queryStr == "" {
+		return nil
+	}
+
+	if req.URL.RawQuery == "" {
+		req.URL.RawQuery = queryStr
+	} else {
+		req.URL.RawQuery += "&" + queryStr
+	}
+	return nil
 }
