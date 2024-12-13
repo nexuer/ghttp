@@ -1,7 +1,9 @@
 package ghttp
 
 import (
+	"bytes"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -24,12 +26,12 @@ func subContentType(contentType string) string {
 	if right < left {
 		return ""
 	}
-	subContentType := contentType[left+1 : right]
-	left = strings.Index(subContentType, "+")
+	sct := contentType[left+1 : right]
+	left = strings.Index(sct, "+")
 	if left >= 0 {
-		return subContentType[left+1:]
+		return sct[left+1:]
 	}
-	return subContentType
+	return sct
 }
 
 func ProxyURL(address string) func(*http.Request) (*url.URL, error) {
@@ -103,6 +105,76 @@ func SetQuery(req *http.Request, q any) error {
 		req.URL.RawQuery = queryStr
 	} else {
 		req.URL.RawQuery += "&" + queryStr
+	}
+	return nil
+}
+
+func BindResponseBody(response *http.Response, reply any) error {
+	if reply == nil {
+		return nil
+	}
+
+	if response.Body == nil || response.Body == http.NoBody {
+		return fmt.Errorf("response: no body")
+	}
+
+	codec, _ := CodecForResponse(response)
+	if codec == nil {
+		return fmt.Errorf("response: unsupported content type: %s",
+			response.Header.Get("Content-Type"))
+	}
+
+	defer response.Body.Close()
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		return err
+	}
+	return codec.Unmarshal(body, reply)
+}
+
+func SetRequestBody(req *http.Request, body io.Reader) error {
+	if body != nil {
+		switch v := body.(type) {
+		case *bytes.Buffer:
+			req.ContentLength = int64(v.Len())
+			buf := v.Bytes()
+			req.GetBody = func() (io.ReadCloser, error) {
+				r := bytes.NewReader(buf)
+				return io.NopCloser(r), nil
+			}
+		case *bytes.Reader:
+			req.ContentLength = int64(v.Len())
+			snapshot := *v
+			req.GetBody = func() (io.ReadCloser, error) {
+				r := snapshot
+				return io.NopCloser(&r), nil
+			}
+		case *strings.Reader:
+			req.ContentLength = int64(v.Len())
+			snapshot := *v
+			req.GetBody = func() (io.ReadCloser, error) {
+				r := snapshot
+				return io.NopCloser(&r), nil
+			}
+		default:
+			// This is where we'd set it to -1 (at least
+			// if body != NoBody) to mean unknown, but
+			// that broke people during the Go 1.8 testing
+			// period. People depend on it being 0 I
+			// guess. Maybe retry later. See Issue 18117.
+		}
+		// For client requests, Request.ContentLength of 0
+		// means either actually 0, or unknown. The only way
+		// to explicitly say that the ContentLength is zero is
+		// to set the Body to nil. But turns out too much code
+		// depends on NewRequest returning a non-nil Body,
+		// so we use a well-known ReadCloser variable instead
+		// and have the http package also treat that sentinel
+		// variable to mean explicitly zero.
+		if req.GetBody != nil && req.ContentLength == 0 {
+			req.Body = http.NoBody
+			req.GetBody = func() (io.ReadCloser, error) { return http.NoBody, nil }
+		}
 	}
 	return nil
 }

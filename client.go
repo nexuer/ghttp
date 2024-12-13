@@ -203,7 +203,7 @@ func (c *Client) Invoke(ctx context.Context, method, path string, args any, repl
 	}
 
 	// marshal request body
-	body, err := c.Body(args)
+	body, err := c.body(args)
 	if err != nil {
 		return nil, err
 	}
@@ -218,8 +218,8 @@ func (c *Client) Invoke(ctx context.Context, method, path string, args any, repl
 		return nil, err
 	}
 
-	if err = c.BindResponseBody(response, reply); err != nil {
-		return nil, NewError(req, response, err)
+	if err = BindResponseBody(response, reply); err != nil {
+		return nil, newError(req, response, err)
 	}
 
 	return response, nil
@@ -259,7 +259,7 @@ func (c *Client) do(req *http.Request, opts ...CallOption) (*http.Response, erro
 		fullPath := joinPath(c.opts.endpoint, req.URL.String())
 		newUrl, err := url.Parse(fullPath)
 		if err != nil {
-			return nil, NewError(req, nil, err)
+			return nil, newError(req, nil, err)
 		}
 		req.URL = newUrl
 	}
@@ -268,7 +268,7 @@ func (c *Client) do(req *http.Request, opts ...CallOption) (*http.Response, erro
 	// apply CallOption before
 	for _, callOpt := range opts {
 		if err = callOpt.Before(req); err != nil {
-			return nil, NewError(req, nil, err)
+			return nil, newError(req, nil, err)
 		}
 	}
 
@@ -290,12 +290,12 @@ func (c *Client) do(req *http.Request, opts ...CallOption) (*http.Response, erro
 	// apply CallOption After
 	for _, callOpt := range opts {
 		if err = callOpt.After(response); err != nil {
-			return nil, NewError(req, response, err)
+			return nil, newError(req, response, err)
 		}
 	}
 
 	if err = c.bindNot2xxError(response); err != nil {
-		return nil, NewError(req, response, err)
+		return nil, newError(req, response, err)
 	}
 
 	return response, nil
@@ -311,14 +311,14 @@ func (c *Client) bindNot2xxError(response *http.Response) error {
 		return nil
 	}
 
-	if err := c.BindResponseBody(response, not2xxError); err != nil {
+	if err := BindResponseBody(response, not2xxError); err != nil {
 		return err
 	}
 
 	return not2xxError
 }
 
-func (c *Client) Body(body any, contentType ...string) (io.Reader, error) {
+func (c *Client) body(body any, contentType ...string) (io.Reader, error) {
 	ct := c.opts.contentType
 	cst := c.contentSubType
 	if len(contentType) > 0 && len(contentType[0]) > 0 {
@@ -339,27 +339,4 @@ func (c *Client) Body(body any, contentType ...string) (io.Reader, error) {
 		return nil, err
 	}
 	return bytes.NewBuffer(bodyBytes), err
-}
-
-func (c *Client) BindResponseBody(response *http.Response, reply any) error {
-	if reply == nil {
-		return nil
-	}
-
-	if response.Body == nil || response.Body == http.NoBody {
-		return fmt.Errorf("response: no body")
-	}
-
-	codec, _ := CodecForResponse(response)
-	if codec == nil {
-		return fmt.Errorf("response: unsupported content type: %s",
-			response.Header.Get("Content-Type"))
-	}
-
-	defer response.Body.Close()
-	body, err := io.ReadAll(response.Body)
-	if err != nil {
-		return err
-	}
-	return codec.Unmarshal(body, reply)
 }

@@ -16,7 +16,7 @@ type Error struct {
 	Err        error
 }
 
-func NewError(req *http.Request, response *http.Response, err error) *Error {
+func newError(req *http.Request, response *http.Response, err error) *Error {
 	e := &Error{
 		URL:    req.URL,
 		Method: req.Method,
