@@ -219,7 +219,7 @@ func (c *Client) Invoke(ctx context.Context, method, path string, args any, repl
 	}
 
 	if err = c.BindResponseBody(response, reply); err != nil {
-		return nil, newError(req, response, err)
+		return nil, NewError(req, response, err)
 	}
 
 	return response, nil
@@ -259,7 +259,7 @@ func (c *Client) do(req *http.Request, opts ...CallOption) (*http.Response, erro
 		fullPath := joinPath(c.opts.endpoint, req.URL.String())
 		newUrl, err := url.Parse(fullPath)
 		if err != nil {
-			return nil, newError(req, nil, err)
+			return nil, NewError(req, nil, err)
 		}
 		req.URL = newUrl
 	}
@@ -268,7 +268,7 @@ func (c *Client) do(req *http.Request, opts ...CallOption) (*http.Response, erro
 	// apply CallOption before
 	for _, callOpt := range opts {
 		if err = callOpt.Before(req); err != nil {
-			return nil, newError(req, nil, err)
+			return nil, NewError(req, nil, err)
 		}
 	}
 
@@ -290,12 +290,12 @@ func (c *Client) do(req *http.Request, opts ...CallOption) (*http.Response, erro
 	// apply CallOption After
 	for _, callOpt := range opts {
 		if err = callOpt.After(response); err != nil {
-			return nil, newError(req, response, err)
+			return nil, NewError(req, response, err)
 		}
 	}
 
 	if err = c.bindNot2xxError(response); err != nil {
-		return nil, newError(req, response, err)
+		return nil, NewError(req, response, err)
 	}
 
 	return response, nil
