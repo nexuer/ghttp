@@ -67,7 +67,7 @@ func IsTimeout(err error) bool {
 }
 
 func StatusForErr(err error) (int, bool) {
-	var e Error
+	var e *Error
 	if errors.As(err, &e) {
 		return e.StatusCode, true
 	}
