@@ -78,6 +78,7 @@ func TestSubContentType(t *testing.T) {
 }
 
 func BenchmarkSubContentType(b *testing.B) {
+
 	for i := 0; i < b.N; i++ {
 		subContentType("application/vnd.docker.distribution.manifest.v2+json; charset=utf-8")
 	}

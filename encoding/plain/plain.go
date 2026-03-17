@@ -1,6 +1,7 @@
 package plain
 
 import (
+	encoding2 "encoding"
 	"fmt"
 	"reflect"
 
@@ -32,8 +33,10 @@ func (codec) Unmarshal(data []byte, v any) error {
 		*val = string(data)
 	case *[]byte:
 		*val = append([]byte(nil), data...)
+	case encoding2.TextUnmarshaler:
+		return val.UnmarshalText(data)
 	default:
-		return fmt.Errorf("supports only string or []byte, got: %v", reflect.TypeOf(v))
+		return fmt.Errorf("supports only *string, *[]byte or encoding.TextUnmarshaler, got: %v", reflect.TypeOf(v))
 	}
 	return nil
 }

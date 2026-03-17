@@ -3,8 +3,6 @@ package ghttp
 import (
 	"context"
 	"net/http"
-
-	"github.com/nexuer/ghttp/query"
 )
 
 type Limiter interface {
@@ -16,27 +14,6 @@ type CallOption interface {
 	After(response *http.Response) error
 }
 
-func setQuery(req *http.Request, q any) error {
-	if q == nil {
-		return nil
-	}
-	values, err := query.Values(q)
-	if err != nil {
-		return err
-	}
-	queryStr := values.Encode()
-	if queryStr == "" {
-		return nil
-	}
-
-	if req.URL.RawQuery == "" {
-		req.URL.RawQuery = queryStr
-	} else {
-		req.URL.RawQuery += "&" + queryStr
-	}
-	return nil
-}
-
 func Query(q any) CallOption {
 	return queryCallOption{query: q}
 }
@@ -46,7 +23,7 @@ type queryCallOption struct {
 }
 
 func (q queryCallOption) Before(request *http.Request) error {
-	return setQuery(request, q.query)
+	return SetQuery(request, q.query)
 }
 
 func (q queryCallOption) After(response *http.Response) error {
@@ -93,6 +70,51 @@ func (b bearerTokenCallOption) After(response *http.Response) error {
 	return nil
 }
 
+func Before(hooks ...RequestFunc) CallOption {
+	return beforeHooksCallOption{hooks}
+}
+
+type beforeHooksCallOption struct {
+	hooks []RequestFunc
+}
+
+func (b beforeHooksCallOption) Before(request *http.Request) error {
+	for _, f := range b.hooks {
+		if err := f(request); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (b beforeHooksCallOption) After(response *http.Response) error {
+	return nil
+}
+
+func After(hooks ...ResponseFunc) CallOption {
+	return afterHooksCallOption{hooks}
+}
+
+type afterHooksCallOption struct {
+	hooks []ResponseFunc
+}
+
+func (b afterHooksCallOption) Before(request *http.Request) error {
+	return nil
+}
+
+func (b afterHooksCallOption) After(response *http.Response) error {
+	for _, f := range b.hooks {
+		if err := f(response); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+type RequestFunc func(request *http.Request) error
+type ResponseFunc func(response *http.Response) error
+
 // CallOptions default call options
 type CallOptions struct {
 	// Set query parameters
@@ -106,18 +128,18 @@ type CallOptions struct {
 	BearerToken string
 
 	// hooks
-	BeforeHook func(request *http.Request) error
-	AfterHook  func(response *http.Response) error
+	BeforeHooks []RequestFunc
+	AfterHooks  []ResponseFunc
 }
 
 func (c *CallOptions) Before(request *http.Request) error {
-	if c.BeforeHook != nil {
-		if err := c.BeforeHook(request); err != nil {
+	for _, f := range c.BeforeHooks {
+		if err := f(request); err != nil {
 			return err
 		}
 	}
 
-	if err := setQuery(request, c.Query); err != nil {
+	if err := SetQuery(request, c.Query); err != nil {
 		return err
 	}
 
@@ -133,8 +155,8 @@ func (c *CallOptions) Before(request *http.Request) error {
 }
 
 func (c *CallOptions) After(response *http.Response) error {
-	if c.AfterHook != nil {
-		if err := c.AfterHook(response); err != nil {
+	for _, f := range c.AfterHooks {
+		if err := f(response); err != nil {
 			return err
 		}
 	}

@@ -8,7 +8,7 @@ go get github.com/nexuer/ghttp
 ## Usage
 
 ### Options
-#### Configure the HTTP RoundTripper
+#### Configure the HTTP roundTripper
 
 `WithTransport(trans http.RoundTripper)`
 ```go
@@ -67,26 +67,7 @@ type CallOption interface {
     After(response *http.Response) error
 }
 ```
-#### `ghttp.CallOptions`
-Implements the `CallOption` interface, providing functionality for:
-```go
-// CallOptions default call options
-type CallOptions struct {
-	// Set query parameters
-	Query any
 
-	// Basic auth
-	Username string
-	Password string
-
-	// Bearer token
-	BearerToken string
-
-	// hooks
-	BeforeHook func(request *http.Request) error
-	AfterHook  func(response *http.Response) error
-}
-```
 ### Binding 
 #### Request Query
 [usage](./query/README.md)
