@@ -62,6 +62,19 @@ func Not2xxCode(code int) bool {
 	return code < 200 || code > 299
 }
 
+func Endpoint(endpoint string) string {
+	endpoint = strings.TrimSpace(endpoint)
+	if endpoint == "" {
+		return ""
+	}
+
+	if strings.HasPrefix(endpoint, "http://") || strings.HasPrefix(endpoint, "https://") {
+		return endpoint
+	}
+
+	return "http://" + endpoint
+}
+
 func joinPath(endpoint, path string) string {
 	if endpoint == "" {
 		return path
