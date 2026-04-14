@@ -4,23 +4,23 @@ import (
 	"context"
 	"errors"
 	"net/http"
-	"net/url"
 	"strconv"
 	"strings"
 )
 
 type Error struct {
-	URL        *url.URL
-	Method     string
+	// The http status code returned.
 	StatusCode int
-	Err        error
+	// The request that failed.
+	Request *http.Request
+
+	Err error
 }
 
 func newError(req *http.Request, response *http.Response, err error) *Error {
 	e := &Error{
-		URL:    req.URL,
-		Method: req.Method,
-		Err:    err,
+		Request: req,
+		Err:     err,
 	}
 	if response != nil {
 		e.StatusCode = response.StatusCode
@@ -31,23 +31,24 @@ func newError(req *http.Request, response *http.Response, err error) *Error {
 func (e Error) Error() string {
 	var buf strings.Builder
 
-	if e.Method != "" {
-		buf.WriteString(e.Method)
+	if e.Request != nil {
+		buf.WriteString(e.Request.Method)
 		buf.WriteByte(' ')
+		if e.Request.URL != nil {
+			buf.WriteString(`"`)
+			buf.WriteString(e.Request.URL.String())
+			buf.WriteString(`"`)
+			buf.WriteByte(' ')
+		}
 	}
 
-	if e.URL != nil {
-		buf.WriteString(`"`)
-		buf.WriteString(e.URL.String())
-		buf.WriteString(`"`)
-		buf.WriteByte(' ')
-	}
 	if e.StatusCode > 0 {
 		buf.WriteByte('[')
 		buf.WriteString(strconv.Itoa(e.StatusCode))
 		buf.WriteByte(']')
 		buf.WriteByte(' ')
 	}
+
 	if e.Err != nil {
 		buf.WriteString("- ")
 		buf.WriteString(e.Err.Error())

@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"net/url"
+	"net/http/httptest"
 	"testing"
 )
 
@@ -35,10 +35,9 @@ func (g *gitlabErr) Error() string {
 }
 
 func TestError_Error(t *testing.T) {
-	u, _ := url.Parse("https://gitlab.com/oauth/token")
+	req := httptest.NewRequest(http.MethodPost, "https://gitlab.com/oauth/token", nil)
 	e := &Error{
-		URL:        u,
-		Method:     http.MethodPost,
+		Request:    req,
 		StatusCode: http.StatusBadRequest,
 		Err: &gitlabErr{
 			Err:              "invalid_request",
@@ -50,14 +49,13 @@ func TestError_Error(t *testing.T) {
 }
 
 func TestError_Unwrap(t *testing.T) {
-	u, _ := url.Parse("https://gitlab.com/oauth/token")
+	req := httptest.NewRequest(http.MethodPost, "https://gitlab.com/oauth/token", nil)
 	ge := &gitlabErr{
 		Err:              "invalid_request",
 		ErrorDescription: "Missing required parameter: grant_type.",
 	}
 	e := &Error{
-		URL:        u,
-		Method:     http.MethodPost,
+		Request:    req,
 		StatusCode: http.StatusBadRequest,
 		Err:        ge,
 	}
