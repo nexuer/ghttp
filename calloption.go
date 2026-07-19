@@ -40,7 +40,6 @@ type basicAuthCallOption struct {
 }
 
 func (b basicAuthCallOption) Before(request *http.Request) error {
-	request.SetBasicAuth(b.username, b.password)
 	if b.username != "" || b.password != "" {
 		request.SetBasicAuth(b.username, b.password)
 	}

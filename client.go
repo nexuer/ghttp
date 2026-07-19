@@ -344,7 +344,7 @@ func (c *Client) body(body any, contentType ...string) (io.Reader, error) {
 		return nil, nil
 	}
 
-	codec := defaultContentType.get(cst)
+	codec := codecForSubtype(cst)
 	if codec == nil {
 		return nil, fmt.Errorf("request: unsupported content type: %s", ct)
 	}

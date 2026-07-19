@@ -104,6 +104,12 @@ func main() {
 }
 ```
 
+Codec lookup helpers:
+
+- `CodecForContentType(contentType string)` resolves a codec from a Content-Type value.
+- `CodecForRequest(request, headerName...)` resolves a codec from a request header.
+- `CodecForResponse(response, headerName...)` resolves a codec from a response header.
+
 ### Debugging
 Enable debugging with `WithDebug`, output example:
 ```text

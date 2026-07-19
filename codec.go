@@ -2,73 +2,61 @@ package ghttp
 
 import (
 	"net/http"
-	"sync"
+	"strings"
 
 	"github.com/nexuer/ghttp/encoding"
 	"github.com/nexuer/ghttp/encoding/json"
-	"github.com/nexuer/ghttp/encoding/plain"
+	_ "github.com/nexuer/ghttp/encoding/plain"
 	"github.com/nexuer/ghttp/encoding/proto"
-	"github.com/nexuer/ghttp/encoding/xml"
+	_ "github.com/nexuer/ghttp/encoding/xml"
 	"github.com/nexuer/ghttp/encoding/yaml"
 )
 
-var defaultContentType = &contentType{
-	subType: map[string]string{
-		// default: json
-		"*": json.Name,
-
-		"json":       json.Name,
-		"x-protobuf": proto.Name,
-		"xml":        xml.Name,
-		"x-yaml":     yaml.Name,
-		"yaml":       yaml.Name,
-		"plain":      plain.Name,
-	},
+// codecAliases maps HTTP content subtypes to differently named codecs.
+// Registration must be completed before codecs are used concurrently.
+var codecAliases = map[string]string{
+	"x-protobuf": proto.Name,
+	"x-yaml":     yaml.Name,
 }
 
-type contentType struct {
-	subType map[string]string
-	mu      sync.RWMutex
+func codecForSubtype(subtype string) encoding.Codec {
+	if alias, ok := codecAliases[subtype]; ok {
+		subtype = alias
+	}
+	return encoding.GetCodec(subtype)
 }
 
-func (c *contentType) set(name string, cname string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.subType[name] = cname
-}
-
-func (c *contentType) get(name string) encoding.Codec {
-	return encoding.GetCodec(c.subType[name])
-}
-
-func RegisterCodecName(contentType string, name string) {
+func registerCodecName(contentType string, name string) {
 	if name == "" {
 		return
 	}
-	defaultContentType.set(subContentType(contentType), name)
+	codecAliases[subContentType(contentType)] = strings.ToLower(name)
 }
 
+// RegisterCodec registers a codec and associates it with a content type.
+// It must be called before codecs are used concurrently.
 func RegisterCodec(contentType string, codec encoding.Codec) {
 	if codec == nil {
 		return
 	}
 	encoding.RegisterCodec(codec)
-	defaultContentType.set(subContentType(contentType), codec.Name())
+	registerCodecName(contentType, codec.Name())
 }
 
-// CodecForString get encoding.Codec via string
-func CodecForString(contentType string) encoding.Codec {
-	return defaultContentType.get(subContentType(contentType))
+// CodecForContentType returns the codec registered for an HTTP content type.
+func CodecForContentType(contentType string) encoding.Codec {
+	return codecForSubtype(subContentType(contentType))
 }
 
-// CodecForRequest get encoding.Codec via http.Request
+// CodecForRequest returns the codec selected from an HTTP request header.
+// It falls back to JSON when the header is missing or unsupported.
 func CodecForRequest(r *http.Request, name ...string) (encoding.Codec, bool) {
 	headerName := "Content-Type"
 	if len(name) > 0 && name[0] != "" {
 		headerName = name[0]
 	}
-	for _, accept := range r.Header[headerName] {
-		codec := CodecForString(accept)
+	for _, accept := range r.Header.Values(headerName) {
+		codec := CodecForContentType(accept)
 		if codec != nil {
 			return codec, true
 		}
@@ -76,14 +64,15 @@ func CodecForRequest(r *http.Request, name ...string) (encoding.Codec, bool) {
 	return encoding.GetCodec(json.Name), false
 }
 
-// CodecForResponse get encoding.Codec via http.Response
+// CodecForResponse returns the codec selected from an HTTP response header.
+// It falls back to JSON when the header is missing or unsupported.
 func CodecForResponse(r *http.Response, name ...string) (encoding.Codec, bool) {
 	headerName := "Content-Type"
 	if len(name) > 0 && name[0] != "" {
 		headerName = name[0]
 	}
-	for _, accept := range r.Header[headerName] {
-		codec := CodecForString(accept)
+	for _, accept := range r.Header.Values(headerName) {
+		codec := CodecForContentType(accept)
 		if codec != nil {
 			return codec, true
 		}
