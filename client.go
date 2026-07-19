@@ -130,12 +130,17 @@ func NewClient(opts ...ClientOption) *Client {
 
 	if options.tlsConf != nil || options.proxy != nil {
 		if tr, ok := options.transport.(*http.Transport); ok {
+			// Clone before applying client-specific settings to avoid mutating a shared transport.
+			tr = tr.Clone()
+
 			if options.tlsConf != nil {
 				tr.TLSClientConfig = options.tlsConf
 			}
 			if options.proxy != nil {
 				tr.Proxy = options.proxy
 			}
+
+			options.transport = tr
 		}
 	}
 

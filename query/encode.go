@@ -1,23 +1,45 @@
 package query
 
 import (
-	"bytes"
 	"fmt"
 	"net/url"
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
-var defaultScopeJoiner ScopeJoiner = func(scope, name string) string {
+// ScopeJoiner joins a parent scope and a nested field or map key.
+type ScopeJoiner func(scope, name string) string
+
+func bracketScopeJoiner(scope, name string) string {
 	return scope + "[" + name + "]"
 }
 
-type ScopeJoiner func(scope, name string) string
+var (
+	scopeJoinerMu      sync.RWMutex
+	defaultScopeJoiner ScopeJoiner = bracketScopeJoiner
+)
 
+// SetScopeJoiner sets the process-wide joiner used for nested struct fields and
+// map keys. It is safe to call concurrently with Values; each Values call uses
+// one snapshot of the joiner. The joiner itself must be safe for concurrent use.
+// Passing nil restores the default bracket notation.
 func SetScopeJoiner(sj ScopeJoiner) {
+	if sj == nil {
+		sj = bracketScopeJoiner
+	}
+	scopeJoinerMu.Lock()
 	defaultScopeJoiner = sj
+	scopeJoinerMu.Unlock()
+}
+
+func currentScopeJoiner() ScopeJoiner {
+	scopeJoinerMu.RLock()
+	sj := defaultScopeJoiner
+	scopeJoinerMu.RUnlock()
+	return sj
 }
 
 var tags = [2]string{"query", "url"}
@@ -150,7 +172,7 @@ func Values(v interface{}) (url.Values, error) {
 		return str, nil
 	}
 
-	err := reflectValue(values, val)
+	err := reflectValue(values, val, currentScopeJoiner())
 	return values, err
 }
 
@@ -158,14 +180,17 @@ func parseQueryString(queryString string) (url.Values, error) {
 	return url.ParseQuery(strings.TrimLeft(queryString, "?"))
 }
 
-func reflectValue(values url.Values, val reflect.Value) error {
+func reflectValue(values url.Values, val reflect.Value, joiner ScopeJoiner) error {
 	switch val.Kind() {
 	case reflect.Map:
-		return reflectMap(values, val, "", 0, nil)
+		return reflectMap(values, val, "", 0, nil, joiner)
 	case reflect.Slice, reflect.Array:
-		return reflectSlice(values, val, "", 0, nil)
+		if val.Len()%2 != 0 {
+			return fmt.Errorf("query: top-level slice or array must contain an even number of elements; got %d", val.Len())
+		}
+		return reflectSlice(values, val, "", 0, nil, joiner)
 	case reflect.Struct:
-		return reflectStruct(values, val, "", 0)
+		return reflectStruct(values, val, "", 0, joiner)
 	default:
 		return fmt.Errorf("query: Values() unsupported kind input. Got %v", val.Kind())
 	}
@@ -174,7 +199,7 @@ func reflectValue(values url.Values, val reflect.Value) error {
 // reflectValue populates the values parameter from the struct fields in val.
 // Embedded structs are followed recursively (using the rules defined in the
 // Values function documentation) breadth-first.
-func reflectStruct(values url.Values, val reflect.Value, scope string, count int) error {
+func reflectStruct(values url.Values, val reflect.Value, scope string, count int, joiner ScopeJoiner) error {
 	var embedded []reflect.Value
 
 	typ := val.Type()
@@ -213,11 +238,20 @@ func reflectStruct(values url.Values, val reflect.Value, scope string, count int
 		}
 
 		if scope != "" {
-			name = scope + "[" + name + "]"
+			name = joiner(scope, name)
 		}
 
 		if opts.contains("omitempty") && isEmptyValue(sv) {
 			continue
+		}
+
+		// Unwrap interface values so the concrete type's Encoder is used.
+		if sv.Kind() == reflect.Interface {
+			if sv.IsNil() {
+				values.Add(name, "")
+				continue
+			}
+			sv = sv.Elem()
 		}
 
 		if sv.Type().Implements(encoderType) {
@@ -235,10 +269,6 @@ func reflectStruct(values url.Values, val reflect.Value, scope string, count int
 		}
 
 		// recursively dereference pointers. break on nil pointers
-		if sv.Kind() == reflect.Interface {
-			sv = sv.Elem()
-		}
-
 		for sv.Kind() == reflect.Ptr {
 			if sv.IsNil() {
 				break
@@ -270,11 +300,14 @@ func reflectStruct(values url.Values, val reflect.Value, scope string, count int
 			} else if opts.contains("brackets") {
 				name = name + "[]"
 			} else {
-				del = sf.Tag.Get("del")
+				del = opts.get("del")
+				if del == "" {
+					del = sf.Tag.Get("del")
+				}
 			}
 
 			if del != "" {
-				s := new(bytes.Buffer)
+				s := new(strings.Builder)
 				first := true
 				for j := 0; j < l; j++ {
 					if first {
@@ -295,7 +328,7 @@ func reflectStruct(values url.Values, val reflect.Value, scope string, count int
 						k = fmt.Sprintf("%s[%d]", name, j)
 					}
 
-					already, err := handleSliceValue(values, sv.Index(j), k, count, opts)
+					already, err := handleSliceValue(values, sv.Index(j), k, count, opts, joiner)
 					if err != nil {
 						return err
 					}
@@ -315,11 +348,11 @@ func reflectStruct(values url.Values, val reflect.Value, scope string, count int
 				}
 			}
 			if sv.Kind() == reflect.Map {
-				if err := reflectMap(values, sv, nextScope, count+1, opts); err != nil {
+				if err := reflectMap(values, sv, nextScope, count+1, opts, joiner); err != nil {
 					return err
 				}
 			} else {
-				if err := reflectStruct(values, sv, nextScope, count+1); err != nil {
+				if err := reflectStruct(values, sv, nextScope, count+1, joiner); err != nil {
 					return err
 				}
 			}
@@ -330,7 +363,7 @@ func reflectStruct(values url.Values, val reflect.Value, scope string, count int
 	}
 
 	for _, f := range embedded {
-		if err := reflectStruct(values, f, scope, count); err != nil {
+		if err := reflectStruct(values, f, scope, count, joiner); err != nil {
 			return err
 		}
 	}
@@ -369,12 +402,12 @@ func isEmptyValue(v reflect.Value) bool {
 	return false
 }
 
-func handleSliceValue(values url.Values, sv reflect.Value, scope string, count int, opts *tagOptions) (bool, error) {
-	if isEmptyValue(sv) {
-		return true, nil
-	}
+func handleSliceValue(values url.Values, sv reflect.Value, scope string, count int, opts *tagOptions, joiner ScopeJoiner) (bool, error) {
 	// recursively dereference pointers. break on nil pointers
 	if sv.Kind() == reflect.Interface {
+		if sv.IsNil() {
+			return false, nil
+		}
 		sv = sv.Elem()
 	}
 
@@ -387,18 +420,18 @@ func handleSliceValue(values url.Values, sv reflect.Value, scope string, count i
 
 	switch sv.Kind() {
 	case reflect.Map:
-		if err := reflectMap(values, sv, scope, count+1, opts); err != nil {
+		if err := reflectMap(values, sv, scope, count+1, opts, joiner); err != nil {
 			return false, err
 		}
 	case reflect.Slice, reflect.Array:
-		if err := reflectSlice(values, sv, scope, count+1, opts); err != nil {
+		if err := reflectSlice(values, sv, scope, count+1, opts, joiner); err != nil {
 			return false, err
 		}
 	case reflect.Struct:
 		if sv.Type() == timeType {
 			return false, nil
 		}
-		if err := reflectStruct(values, sv, scope, count+1); err != nil {
+		if err := reflectStruct(values, sv, scope, count+1, joiner); err != nil {
 			return false, err
 		}
 	default:
@@ -408,7 +441,7 @@ func handleSliceValue(values url.Values, sv reflect.Value, scope string, count i
 	return true, nil
 }
 
-func reflectSlice(values url.Values, val reflect.Value, scope string, count int, opts *tagOptions) error {
+func reflectSlice(values url.Values, val reflect.Value, scope string, count int, opts *tagOptions, joiner ScopeJoiner) error {
 	l := val.Len()
 	if l == 0 {
 		return nil
@@ -416,7 +449,7 @@ func reflectSlice(values url.Values, val reflect.Value, scope string, count int,
 	for i := 0; i < l; i++ {
 		sv := val.Index(i)
 
-		already, err := handleSliceValue(values, sv, scope, count, opts)
+		already, err := handleSliceValue(values, sv, scope, count, opts, joiner)
 		if err != nil {
 			return err
 		}
@@ -425,40 +458,39 @@ func reflectSlice(values url.Values, val reflect.Value, scope string, count int,
 			continue
 		}
 
-		endIndex := i + 1
-		if endIndex > l {
+		// A scoped slice belongs to one query key, so encode each element separately.
+		if scope != "" {
+			values.Add(scope, valueString(sv, opts))
 			continue
 		}
-		if scope != "" {
-			values.Add(scope, valueString(sv, nil))
-			values.Add(scope, valueString(val.Index(endIndex), nil))
-		} else {
-			if endIndex > l-1 {
-				continue
-			}
-			key := valueString(sv, nil)
-			values.Add(key, valueString(val.Index(endIndex), nil))
+
+		// A top-level slice is interpreted as alternating key/value pairs.
+		endIndex := i + 1
+		if endIndex >= l {
+			continue
 		}
+		key := valueString(sv, nil)
+		values.Add(key, valueString(val.Index(endIndex), nil))
 		i++
 	}
 	return nil
 }
 
-func reflectMap(values url.Values, val reflect.Value, scope string, count int, opts *tagOptions) error {
+func reflectMap(values url.Values, val reflect.Value, scope string, count int, opts *tagOptions, joiner ScopeJoiner) error {
 	iter := val.MapRange()
 	for iter.Next() {
 		sv := iter.Value()
-		if isEmptyValue(sv) {
-			continue
-		}
-
 		key := valueString(iter.Key(), nil)
 		if scope != "" {
-			key = defaultScopeJoiner(scope, key)
+			key = joiner(scope, key)
 		}
 
 		// recursively dereference pointers. break on nil pointers
 		if sv.Kind() == reflect.Interface {
+			if sv.IsNil() {
+				values.Add(key, "")
+				continue
+			}
 			sv = sv.Elem()
 		}
 		for sv.Kind() == reflect.Ptr {
@@ -475,15 +507,15 @@ func reflectMap(values url.Values, val reflect.Value, scope string, count int, o
 
 		switch sv.Kind() {
 		case reflect.Map:
-			if err := reflectMap(values, sv, key, count+1, opts); err != nil {
+			if err := reflectMap(values, sv, key, count+1, opts, joiner); err != nil {
 				return err
 			}
 		case reflect.Slice, reflect.Array:
-			if err := reflectSlice(values, sv, key, count+1, opts); err != nil {
+			if err := reflectSlice(values, sv, key, count+1, opts, joiner); err != nil {
 				return err
 			}
 		case reflect.Struct:
-			if err := reflectStruct(values, sv, key, count+1); err != nil {
+			if err := reflectStruct(values, sv, key, count+1, joiner); err != nil {
 				return err
 			}
 		default:
@@ -496,7 +528,14 @@ func reflectMap(values url.Values, val reflect.Value, scope string, count int, o
 
 // valueString returns the string representation of a value
 func valueString(v reflect.Value, opts *tagOptions) string {
+	if !v.IsValid() {
+		return ""
+	}
+
 	if v.Kind() == reflect.Interface {
+		if v.IsNil() {
+			return ""
+		}
 		v = v.Elem()
 	}
 

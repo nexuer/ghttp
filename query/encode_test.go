@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/url"
 	"reflect"
+	"sync"
 	"testing"
 	"time"
 
@@ -22,6 +23,107 @@ func testValue(t *testing.T, input interface{}, want url.Values) {
 	}
 }
 
+func TestValues_NilInterface(t *testing.T) {
+	testValue(t, struct{ V any }{}, url.Values{"V": {""}})
+}
+
+func TestValues_MapWithSingleElementSlice(t *testing.T) {
+	testValue(t, map[string][]int{"a": {1}}, url.Values{"a": {"1"}})
+}
+
+func TestSetScopeJoiner(t *testing.T) {
+	t.Cleanup(func() {
+		SetScopeJoiner(nil)
+	})
+
+	type user struct {
+		Name string `query:"name"`
+	}
+	type input struct {
+		User user              `query:"user"`
+		Meta map[string]string `query:"meta"`
+	}
+	v := input{
+		User: user{Name: "alice"},
+		Meta: map[string]string{"role": "admin"},
+	}
+
+	SetScopeJoiner(func(scope, name string) string {
+		return scope + "." + name
+	})
+	testValue(t, v, url.Values{
+		"user.name": {"alice"},
+		"meta.role": {"admin"},
+	})
+
+	SetScopeJoiner(nil)
+	testValue(t, v, url.Values{
+		"user[name]": {"alice"},
+		"meta[role]": {"admin"},
+	})
+}
+
+func TestSetScopeJoiner_Concurrent(t *testing.T) {
+	SetScopeJoiner(nil)
+	t.Cleanup(func() {
+		SetScopeJoiner(nil)
+	})
+
+	type child struct {
+		First  string `query:"first"`
+		Second string `query:"second"`
+	}
+	v := struct {
+		Left  child `query:"left"`
+		Right child `query:"right"`
+	}{
+		Left:  child{First: "1", Second: "2"},
+		Right: child{First: "3", Second: "4"},
+	}
+
+	bracketValues := url.Values{
+		"left[first]":   {"1"},
+		"left[second]":  {"2"},
+		"right[first]":  {"3"},
+		"right[second]": {"4"},
+	}
+	dotValues := url.Values{
+		"left.first":   {"1"},
+		"left.second":  {"2"},
+		"right.first":  {"3"},
+		"right.second": {"4"},
+	}
+	joiners := []ScopeJoiner{
+		bracketScopeJoiner,
+		func(scope, name string) string {
+			return scope + "." + name
+		},
+	}
+
+	const iterations = 100
+	var wg sync.WaitGroup
+	for i := 0; i < iterations; i++ {
+		sj := joiners[i%len(joiners)]
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			SetScopeJoiner(sj)
+		}()
+		go func() {
+			defer wg.Done()
+			values, err := Values(v)
+			if err != nil {
+				t.Errorf("Values() returned error: %v", err)
+				return
+			}
+			if !cmp.Equal(values, bracketValues) && !cmp.Equal(values, dotValues) {
+				t.Errorf("Values() used mixed scope joiners: %v", values)
+			}
+		}()
+	}
+	wg.Wait()
+}
+
 func TestValues_string(t *testing.T) {
 	tests := []struct {
 		input string
@@ -32,7 +134,7 @@ func TestValues_string(t *testing.T) {
 		{input: "?", want: url.Values{}},
 		{input: "??", want: url.Values{}},
 
-		// simple non-zero values
+		// simple values
 		{input: "a=a&b=b", want: url.Values{"a": {"a"}, "b": {"b"}}},
 		{input: "?a=a&b=b", want: url.Values{"a": {"a"}, "b": {"b"}}},
 		{input: "??a=a&b=b", want: url.Values{"a": {"a"}, "b": {"b"}}},
@@ -68,6 +170,10 @@ func TestValues_map(t *testing.T) {
 
 		// simple non-zero values
 		{input: map[string]interface{}{"a": 1, "b": 2}, want: url.Values{"a": {"1"}, "b": {"2"}}},
+		{input: map[string]string{"a": ""}, want: url.Values{"a": {""}}},
+		{input: map[string]int{"a": 0}, want: url.Values{"a": {"0"}}},
+		{input: map[string]bool{"a": false}, want: url.Values{"a": {"false"}}},
+		{input: map[string]interface{}{"a": nil}, want: url.Values{"a": {""}}},
 
 		// map
 		{
@@ -76,7 +182,7 @@ func TestValues_map(t *testing.T) {
 					"name": "",
 				},
 			},
-			url.Values{},
+			url.Values{"a[name]": {""}},
 		},
 		{
 			map[string]interface{}{
@@ -125,6 +231,7 @@ func TestValues_map(t *testing.T) {
 		{input: map[string][]int{"a": []int{1, 2}}, want: url.Values{"a": {"1", "2"}}},
 		{input: map[string][]string{"a": []string{"1", "2"}}, want: url.Values{"a": {"1", "2"}}},
 		{input: map[string][]bool{"a": []bool{true, false}}, want: url.Values{"a": {"true", "false"}}},
+		{input: map[string][]interface{}{"a": {nil}}, want: url.Values{"a": {""}}},
 		{input: map[string][]map[string]string{
 			"first": []map[string]string{
 				{
@@ -191,10 +298,6 @@ func TestValues_array_or_slice(t *testing.T) {
 		{input: []string{"a", "1", "b", "2"}, want: url.Values{"a": {"1"}, "b": {"2"}}},
 		{input: [4]string{"a", "1", "b", "2"}, want: url.Values{"a": {"1"}, "b": {"2"}}},
 
-		// simple non-zero values of odd length
-		{input: []string{"a", "1", "b"}, want: url.Values{"a": {"1"}}},
-		{input: [3]string{"a", "1", "b"}, want: url.Values{"a": {"1"}}},
-
 		// non-zero values
 		{input: []interface{}{"a", "1", "b", 2}, want: url.Values{"a": {"1"}, "b": {"2"}}},
 		{input: [4]interface{}{"a", 1, "b", "2"}, want: url.Values{"a": {"1"}, "b": {"2"}}},
@@ -211,6 +314,25 @@ func TestValues_array_or_slice(t *testing.T) {
 
 	for _, tt := range tests {
 		testValue(t, tt.input, tt.want)
+	}
+}
+
+func TestValues_array_or_slice_odd_length(t *testing.T) {
+	tests := []interface{}{
+		[]string{"a", "1", "b"},
+		[3]string{"a", "1", "b"},
+	}
+
+	for _, input := range tests {
+		_, err := Values(input)
+		if err == nil {
+			t.Errorf("Values(%#v) did not return an error", input)
+			continue
+		}
+		want := "query: top-level slice or array must contain an even number of elements; got 3"
+		if err.Error() != want {
+			t.Errorf("Values(%#v) error = %q; want %q", input, err, want)
+		}
 	}
 }
 
@@ -406,7 +528,7 @@ func TestValues_Slices(t *testing.T) {
 		},
 		{
 			struct{ V []string }{[]string{""}},
-			url.Values{},
+			url.Values{"V": {""}},
 		},
 		{
 			struct{ V []string }{[]string{"a", "b"}},
@@ -478,7 +600,7 @@ func TestValues_Slices(t *testing.T) {
 		// arrays of strings
 		{
 			struct{ V [2]string }{},
-			url.Values{},
+			url.Values{"V": {"", ""}},
 		},
 		{
 			struct{ V [2]string }{[2]string{"a", "b"}},
@@ -539,6 +661,12 @@ func TestValues_Slices(t *testing.T) {
 				V []string `del:"🥑"`
 			}{[]string{"a", "b"}},
 			url.Values{"V": {"a🥑b"}},
+		},
+		{
+			struct {
+				V []string `query:",del:!"`
+			}{[]string{"a", "b"}},
+			url.Values{"V": {"a!b"}},
 		},
 
 		// slice of bools with additional options
@@ -926,6 +1054,14 @@ func TestValues_CustomEncodingSlice(t *testing.T) {
 			struct {
 				V *customEncodedStrings `url:"v"`
 			}{(*customEncodedStrings)(&[]string{"a", "b"})},
+			url.Values{"v.0": {"a"}, "v.1": {"b"}},
+		},
+
+		// custom encoded type held in an interface field
+		{
+			struct {
+				V interface{} `query:"v"`
+			}{customEncodedStrings{"a", "b"}},
 			url.Values{"v.0": {"a"}, "v.1": {"b"}},
 		},
 	}
