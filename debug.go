@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"crypto/x509/pkix"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -11,7 +12,9 @@ import (
 	"net/http"
 	"net/http/httptrace"
 	"os"
+	"sort"
 	"strings"
+	"sync"
 	"text/tabwriter"
 	"time"
 
@@ -29,7 +32,14 @@ type Debug struct {
 	Writer        io.Writer
 	Trace         bool
 	TraceCallback func(w io.Writer, info TraceInfo)
+
+	// ResponseBodyLimit is the maximum number of response body bytes kept for
+	// debug output. Zero uses the default limit; a negative value disables
+	// response body logging.
+	ResponseBodyLimit int64
 }
+
+const defaultDebugResponseBodyLimit int64 = 64 << 10
 
 func (d *Debug) writer() io.Writer {
 	if d.Writer == nil {
@@ -45,36 +55,88 @@ func (d *Debug) Begin(req *http.Request) *http.Request {
 		return req
 	}
 
-	state := &traceInfo{startTime: time.Now()}
+	state := &traceInfo{
+		startTime:     time.Now(),
+		connectStarts: make(map[string]time.Time),
+	}
 	trace := &httptrace.ClientTrace{
 		DNSStart: func(info httptrace.DNSStartInfo) {
-			state.dnsStartTime = time.Now()
-			state.host = info.Host
+			now := time.Now()
+			state.mu.Lock()
+			state.dnsStartTime = now
+			state.dnsHost = info.Host
+			state.mu.Unlock()
 		},
 		DNSDone: func(dnsInfo httptrace.DNSDoneInfo) {
-			state.dnsDoneTime = time.Now()
-			state.dnsDoneInfo = &dnsInfo
+			now := time.Now()
+			copied := dnsInfo
+			copied.Addrs = append([]net.IPAddr(nil), dnsInfo.Addrs...)
+			state.mu.Lock()
+			state.dnsDoneTime = now
+			state.dnsDoneInfo = &copied
+			state.mu.Unlock()
 		},
 		GetConn: func(hostPort string) {
-			state.getConnTime = time.Now()
+			now := time.Now()
+			state.mu.Lock()
+			state.getConnTime = now
 			state.getConnHostPort = hostPort
+			state.mu.Unlock()
 		},
 		GotConn: func(connInfo httptrace.GotConnInfo) {
-			state.gotConnTime = time.Now()
-			state.gotConnInfo = &connInfo
+			now := time.Now()
+			copied := connInfo
+			state.mu.Lock()
+			state.gotConnTime = now
+			state.gotConnInfo = &copied
+			state.mu.Unlock()
+		},
+		ConnectStart: func(network, addr string) {
+			now := time.Now()
+			state.mu.Lock()
+			state.connectStarts[connectTraceKey(network, addr)] = now
+			state.mu.Unlock()
+		},
+		ConnectDone: func(network, addr string, err error) {
+			now := time.Now()
+			key := connectTraceKey(network, addr)
+			state.mu.Lock()
+			started := state.connectStarts[key]
+			delete(state.connectStarts, key)
+			if err == nil && state.tcpConnectDoneTime.IsZero() {
+				state.tcpConnectStartTime = started
+				state.tcpConnectDoneTime = now
+				state.tcpConnectAddr = addr
+			}
+			state.mu.Unlock()
 		},
 		TLSHandshakeStart: func() {
-			state.tlsHandshakeStartTime = time.Now()
+			now := time.Now()
+			state.mu.Lock()
+			state.tlsHandshakeStartTime = now
+			state.mu.Unlock()
 		},
 		TLSHandshakeDone: func(connectionState tls.ConnectionState, err error) {
-			state.tlsHandshakeDoneTime = time.Now()
-			state.tlsConnectionState = &connectionState
+			now := time.Now()
+			state.mu.Lock()
+			state.tlsHandshakeDoneTime = now
+			if err == nil {
+				copied := connectionState
+				state.tlsConnectionState = &copied
+			}
+			state.mu.Unlock()
 		},
 		GotFirstResponseByte: func() {
-			state.gotFirstResponseByteTime = time.Now()
+			now := time.Now()
+			state.mu.Lock()
+			state.gotFirstResponseByteTime = now
+			state.mu.Unlock()
 		},
 		WroteRequest: func(info httptrace.WroteRequestInfo) {
-			state.wroteRequestTime = time.Now()
+			now := time.Now()
+			state.mu.Lock()
+			state.wroteRequestTime = now
+			state.mu.Unlock()
 		},
 	}
 
@@ -87,24 +149,66 @@ func (d *Debug) statTraceInfo(ctx context.Context, state *traceInfo) TraceInfo {
 	if !d.Trace || state == nil {
 		return TraceInfo{}
 	}
-	return TraceInfo{
-		ctx:                  ctx,
-		DNSDuration:          state.dnsDoneTime.Sub(state.dnsStartTime),
-		ConnectDuration:      state.gotConnTime.Sub(state.getConnTime),
-		TLSHandshakeDuration: state.tlsHandshakeDoneTime.Sub(state.tlsHandshakeStartTime),
-		RequestDuration:      state.wroteRequestTime.Sub(state.gotConnTime),
-		WaitResponseDuration: state.gotFirstResponseByteTime.Sub(state.wroteRequestTime),
+	state.mu.Lock()
+	defer state.mu.Unlock()
 
-		ResponseDuration: state.responseDoneTime.Sub(state.gotFirstResponseByteTime),
-		TotalDuration:    state.responseDoneTime.Sub(state.startTime),
+	dnsDuration, dnsDurationSet := traceDuration(state.dnsStartTime, state.dnsDoneTime)
+	connectDuration, connectDurationSet := traceDuration(state.getConnTime, state.gotConnTime)
+	tcpConnectDuration, tcpConnectDurationSet := traceDuration(
+		state.tcpConnectStartTime, state.tcpConnectDoneTime)
+	tlsDuration, tlsDurationSet := traceDuration(
+		state.tlsHandshakeStartTime, state.tlsHandshakeDoneTime)
+	requestDuration, requestDurationSet := traceDuration(state.gotConnTime, state.wroteRequestTime)
+	waitDuration, waitDurationSet := traceDuration(
+		state.wroteRequestTime, state.gotFirstResponseByteTime)
+	responseDuration, responseDurationSet := traceDuration(
+		state.gotFirstResponseByteTime, state.responseDoneTime)
+	totalDuration, totalDurationSet := traceDuration(state.startTime, state.responseDoneTime)
+
+	connectionReused := false
+	connectionReusedSet := state.gotConnInfo != nil
+	if connectionReusedSet {
+		connectionReused = state.gotConnInfo.Reused
 	}
+
+	return TraceInfo{
+		ctx:                     ctx,
+		DNSDuration:             dnsDuration,
+		ConnectDuration:         connectDuration,
+		TCPConnectDuration:      tcpConnectDuration,
+		TLSHandshakeDuration:    tlsDuration,
+		RequestDuration:         requestDuration,
+		WaitResponseDuration:    waitDuration,
+		ResponseDuration:        responseDuration,
+		TotalDuration:           totalDuration,
+		ConnectionReused:        connectionReused,
+		dnsDurationSet:          dnsDurationSet,
+		connectDurationSet:      connectDurationSet,
+		tcpConnectDurationSet:   tcpConnectDurationSet,
+		tlsHandshakeDurationSet: tlsDurationSet,
+		requestDurationSet:      requestDurationSet,
+		waitResponseDurationSet: waitDurationSet,
+		responseDurationSet:     responseDurationSet,
+		totalDurationSet:        totalDurationSet,
+		connectionReusedSet:     connectionReusedSet,
+	}
+}
+
+func connectTraceKey(network, addr string) string {
+	return network + "\x00" + addr
+}
+
+func traceDuration(start, end time.Time) (time.Duration, bool) {
+	if start.IsZero() || end.IsZero() || end.Before(start) {
+		return 0, false
+	}
+	return end.Sub(start), true
 }
 
 func (d *Debug) End(request *http.Request, response *http.Response, err error) {
 	writer := d.writer()
 
-	// print request and response
-	path := request.URL.String()
+	path := request.URL.RequestURI()
 	if path == "" {
 		path = "/"
 	}
@@ -112,25 +216,34 @@ func (d *Debug) End(request *http.Request, response *http.Response, err error) {
 	if d.Trace {
 		state, _ := request.Context().Value(debugStateKey{}).(*traceInfo)
 		if state != nil {
-			state.responseDoneTime = time.Now()
+			now := time.Now()
+			state.mu.Lock()
+			state.responseDoneTime = now
+			state.mu.Unlock()
 		}
 		if d.TraceCallback != nil {
 			d.TraceCallback(writer, d.statTraceInfo(request.Context(), state))
 		}
 		if state != nil {
-			if state.host == "" {
-				state.host = request.URL.Host
-			}
-			state.write(writer)
+			state.write(writer, request.URL.Hostname())
 		}
 	}
 
-	write(writer, "* using %s", request.Proto)
-	write(writer, "> %s %s %s", request.Method, path, request.Proto)
-	// write request header
-	for k, v := range request.Header {
-		write(writer, "> %s: %s", k, strings.Join(v, ","))
+	if response != nil && response.Proto != "" {
+		write(writer, "* using %s", response.Proto)
+		write(writer, "> %s %s %s", request.Method, path, response.Proto)
+	} else {
+		write(writer, "> %s %s", request.Method, path)
 	}
+	host := request.Host
+	if host == "" {
+		host = request.URL.Host
+	}
+	if host != "" {
+		write(writer, "> Host: %s", host)
+	}
+	writeHeaders(writer, ">", request.Header, true)
+	write(writer, ">")
 
 	// request body
 	if request.GetBody != nil {
@@ -141,36 +254,32 @@ func (d *Debug) End(request *http.Request, response *http.Response, err error) {
 				codec, _ := CodecForRequest(request)
 				reqBodyBs, _ := formatIndent(codec, reqBody)
 				if len(reqBodyBs) > 0 {
-					write(writer, "")
 					write(writer, "%s", string(reqBodyBs))
 				}
 			}
 		}
-	} else {
-		write(writer, ">")
 	}
 
 	if response != nil {
 		write(writer, "")
-		// response
-		write(writer, "< %s %s", response.Proto, response.Status)
-		for k, v := range response.Header {
-			write(writer, "< %s: %s", k, strings.Join(v, ","))
+		if response.Proto != "" {
+			write(writer, "< %s %s", response.Proto, response.Status)
+		} else {
+			write(writer, "< %s", response.Status)
 		}
+		writeHeaders(writer, "<", response.Header, false)
+		write(writer, "<")
 		// response body
 		if response.Body != nil && response.Body != http.NoBody {
-			originalBody := response.Body
-			if responseBody, err := io.ReadAll(originalBody); err == nil {
-				_ = originalBody.Close()
-				response.Body = io.NopCloser(bytes.NewReader(responseBody))
-				codec, _ := CodecForResponse(response)
-				resBodyBs, _ := formatIndent(codec, responseBody)
-				if len(resBodyBs) > 0 {
-					write(writer, "")
-					write(writer, "%s", string(resBodyBs))
-				} else {
-					write(writer, "")
-					write(writer, "%s", string(responseBody))
+			limit := d.responseBodyLimit()
+			if limit >= 0 {
+				response.Body = &debugResponseBody{
+					body:     response.Body,
+					limit:    limit,
+					expected: response.ContentLength,
+					onDone: func(body []byte, truncated, closedEarly bool, readErr error) {
+						d.writeResponseBody(writer, response, body, truncated, closedEarly, readErr)
+					},
 				}
 			}
 		}
@@ -182,16 +291,156 @@ func (d *Debug) End(request *http.Request, response *http.Response, err error) {
 	}
 }
 
+func writeHeaders(writer io.Writer, prefix string, header http.Header, skipHost bool) {
+	keys := make([]string, 0, len(header))
+	for key := range header {
+		if skipHost && strings.EqualFold(key, "Host") {
+			continue
+		}
+		keys = append(keys, key)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		left := strings.ToLower(keys[i])
+		right := strings.ToLower(keys[j])
+		if left == right {
+			return keys[i] < keys[j]
+		}
+		return left < right
+	})
+	for _, key := range keys {
+		values := header[key]
+		if len(values) == 0 {
+			write(writer, "%s %s:", prefix, key)
+			continue
+		}
+		for _, value := range values {
+			write(writer, "%s %s: %s", prefix, key, value)
+		}
+	}
+}
+
+func (d *Debug) responseBodyLimit() int64 {
+	if d.ResponseBodyLimit == 0 {
+		return defaultDebugResponseBodyLimit
+	}
+	return d.ResponseBodyLimit
+}
+
+func (d *Debug) writeResponseBody(writer io.Writer, response *http.Response, body []byte,
+	truncated, closedEarly bool, readErr error) {
+	if len(body) > 0 {
+		codec, _ := CodecForResponse(response)
+		formatted, _ := formatIndent(codec, body)
+		if len(formatted) == 0 {
+			formatted = body
+		}
+		write(writer, "%s", string(formatted))
+	}
+	if truncated {
+		write(writer, "* response body truncated after %d bytes", len(body))
+	}
+	if closedEarly {
+		write(writer, "* response body closed before EOF")
+	}
+	if readErr != nil && readErr != io.EOF {
+		write(writer, "** RESPONSE BODY ERROR: %s", readErr)
+	}
+}
+
+type debugResponseBody struct {
+	body     io.ReadCloser
+	limit    int64
+	expected int64
+	buf      bytes.Buffer
+	onDone   func(body []byte, truncated, closedEarly bool, readErr error)
+
+	truncated bool
+	done      bool
+	read      int64
+	mu        sync.Mutex
+	once      sync.Once
+}
+
+func (b *debugResponseBody) Read(p []byte) (n int, err error) {
+	n, err = b.body.Read(p)
+	if n > 0 {
+		b.capture(p[:n])
+	}
+	if err != nil {
+		b.mu.Lock()
+		b.done = true
+		b.mu.Unlock()
+		b.finish(false, err)
+	}
+	return n, err
+}
+
+func (b *debugResponseBody) Close() error {
+	err := b.body.Close()
+	b.mu.Lock()
+	closedEarly := !b.done
+	b.mu.Unlock()
+	b.finish(closedEarly, nil)
+	return err
+}
+
+func (b *debugResponseBody) capture(p []byte) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	b.read += int64(len(p))
+	if b.expected > 0 && b.read >= b.expected {
+		b.done = true
+	}
+
+	remaining := b.limit - int64(b.buf.Len())
+	if remaining <= 0 {
+		b.truncated = true
+		return
+	}
+	if int64(len(p)) > remaining {
+		_, _ = b.buf.Write(p[:remaining])
+		b.truncated = true
+		return
+	}
+	_, _ = b.buf.Write(p)
+}
+
+func (b *debugResponseBody) finish(closedEarly bool, readErr error) {
+	b.once.Do(func() {
+		if b.onDone == nil {
+			return
+		}
+		b.mu.Lock()
+		body := append([]byte(nil), b.buf.Bytes()...)
+		truncated := b.truncated
+		b.mu.Unlock()
+		b.onDone(body, truncated, closedEarly, readErr)
+	})
+}
+
 type TraceInfo struct {
 	ctx context.Context
 
 	DNSDuration          time.Duration `json:"DNSDuration,omitempty" yaml:"DNSDuration" xml:"DNSDuration"`
 	ConnectDuration      time.Duration `json:"connectDuration,omitempty" yaml:"connectDuration" xml:"connectDuration"`
+	TCPConnectDuration   time.Duration `json:"tcpConnectDuration,omitempty" yaml:"tcpConnectDuration" xml:"tcpConnectDuration"`
 	TLSHandshakeDuration time.Duration `json:"TLSHandshakeDuration,omitempty" yaml:"TLSHandshakeDuration" xml:"TLSHandshakeDuration"`
 	RequestDuration      time.Duration `json:"requestDuration,omitempty" yaml:"requestDuration" xml:"requestDuration"`
 	WaitResponseDuration time.Duration `json:"waitResponseDuration,omitempty" yaml:"waitResponseDuration" xml:"waitResponseDuration"`
 	ResponseDuration     time.Duration `json:"responseDuration,omitempty" yaml:"responseDuration" xml:"responseDuration"`
 	TotalDuration        time.Duration `json:"totalDuration,omitempty" yaml:"totalDuration" xml:"totalDuration"`
+	ConnectionReused     bool          `json:"connectionReused,omitempty" yaml:"connectionReused" xml:"connectionReused"`
+
+	dnsDurationSet          bool
+	connectDurationSet      bool
+	tcpConnectDurationSet   bool
+	tlsHandshakeDurationSet bool
+	requestDurationSet      bool
+	waitResponseDurationSet bool
+	responseDurationSet     bool
+	totalDurationSet        bool
+	connectionReusedSet     bool
 }
 
 func (t TraceInfo) Context() context.Context {
@@ -204,33 +453,61 @@ func (t TraceInfo) String() string {
 
 func (t TraceInfo) Table() []byte {
 	var buf bytes.Buffer
-	w := tabwriter.NewWriter(&buf, 30, 0, 3, ' ', tabwriter.TabIndent)
+	w := tabwriter.NewWriter(&buf, 24, 0, 3, ' ', tabwriter.TabIndent)
 	_, _ = fmt.Fprintln(w, "--------------------------------------------")
-	_, _ = fmt.Fprintln(w, "Trace\tValue\t")
+	_, _ = fmt.Fprintln(w, "Timing\tValue\t")
 	_, _ = fmt.Fprintln(w, "--------------------------------------------")
-	_, _ = fmt.Fprintf(w, "DNSDuration\t%s\t\n", t.DNSDuration)
-	_, _ = fmt.Fprintf(w, "ConnectDuration\t%s\t\n", t.ConnectDuration)
-	_, _ = fmt.Fprintf(w, "TLSHandshakeDuration\t%s\t\n", t.TLSHandshakeDuration)
-	_, _ = fmt.Fprintf(w, "RequestDuration\t%s\t\n", t.RequestDuration)
-	_, _ = fmt.Fprintf(w, "WaitResponseDuration\t%s\t\n", t.WaitResponseDuration)
-	_, _ = fmt.Fprintf(w, "TotalDuration\t%s\t\n", t.TotalDuration)
+	_, _ = fmt.Fprintf(w, "DNS Lookup\t%s\t\n", traceDurationString(t.DNSDuration, t.dnsDurationSet))
+	_, _ = fmt.Fprintf(w, "TCP Connect\t%s\t\n",
+		traceDurationString(t.TCPConnectDuration, t.tcpConnectDurationSet))
+	_, _ = fmt.Fprintf(w, "TLS Handshake\t%s\t\n",
+		traceDurationString(t.TLSHandshakeDuration, t.tlsHandshakeDurationSet))
+	_, _ = fmt.Fprintf(w, "Connection Acquire\t%s\t\n",
+		traceDurationString(t.ConnectDuration, t.connectDurationSet))
+	_, _ = fmt.Fprintf(w, "Connection Reused\t%s\t\n",
+		traceBoolString(t.ConnectionReused, t.connectionReusedSet))
+	_, _ = fmt.Fprintf(w, "Request Write\t%s\t\n",
+		traceDurationString(t.RequestDuration, t.requestDurationSet))
+	_, _ = fmt.Fprintf(w, "TTFB\t%s\t\n",
+		traceDurationString(t.WaitResponseDuration, t.waitResponseDurationSet))
+	_, _ = fmt.Fprintf(w, "Time to Headers\t%s\t\n",
+		traceDurationString(t.TotalDuration, t.totalDurationSet))
 	_, _ = fmt.Fprintln(w, "--------------------------------------------")
 
 	_ = w.Flush()
 	return buf.Bytes()
 }
 
+func traceDurationString(duration time.Duration, set bool) string {
+	if !set && duration == 0 {
+		return "-"
+	}
+	return duration.String()
+}
+
+func traceBoolString(value, set bool) string {
+	if !set && !value {
+		return "-"
+	}
+	return fmt.Sprintf("%t", value)
+}
+
 type traceInfo struct {
-	host               string
+	mu                 sync.Mutex
+	dnsHost            string
 	dnsDoneInfo        *httptrace.DNSDoneInfo
 	getConnHostPort    string
 	gotConnInfo        *httptrace.GotConnInfo
 	tlsConnectionState *tls.ConnectionState
+	connectStarts      map[string]time.Time
+	tcpConnectAddr     string
 
 	dnsStartTime             time.Time
 	dnsDoneTime              time.Time
 	getConnTime              time.Time
 	gotConnTime              time.Time
+	tcpConnectStartTime      time.Time
+	tcpConnectDoneTime       time.Time
 	tlsHandshakeStartTime    time.Time
 	tlsHandshakeDoneTime     time.Time
 	gotFirstResponseByteTime time.Time
@@ -240,53 +517,124 @@ type traceInfo struct {
 	responseDoneTime time.Time
 }
 
-func (t traceInfo) write(w io.Writer) {
-	// print trace
-	if t.dnsDoneInfo != nil {
-		write(w, "* Host %s was resolved.", t.getConnHostPort)
-		for _, ipAddr := range t.dnsDoneInfo.Addrs {
-			if len(ipAddr.IP) == net.IPv4len {
-				write(w, "* IPv4: %s", ipAddr.IP)
-			}
-			if len(ipAddr.IP) == net.IPv6len {
-				write(w, "* IPv6: %s", ipAddr.IP)
-			}
-		}
-	}
-
-	if t.gotConnInfo != nil {
-		remoteAddr := t.gotConnInfo.Conn.RemoteAddr()
-		write(w, "*   Trying %s...", remoteAddr)
-		ip, port, _ := net.SplitHostPort(remoteAddr.String())
-		write(w, "* Connected to %s (%s) port %s", t.host, ip, port)
-	}
-
-	if t.tlsConnectionState != nil {
-		write(w, "* SSL connection using %s / %s",
-			tls.VersionName(t.tlsConnectionState.Version),
-			tls.CipherSuiteName(t.tlsConnectionState.CipherSuite),
-		)
-		write(w, "* ALPN: server accepted %s", t.tlsConnectionState.NegotiatedProtocol)
-		if len(t.tlsConnectionState.VerifiedChains) > 0 && len(t.tlsConnectionState.VerifiedChains[0]) > 0 {
-			cer := t.tlsConnectionState.VerifiedChains[0][0]
-			write(w, `* Server certificate:
-*   subject: CN=%s
-*   notBefore: %s
-*   notAfter: %s
-*   issuer: C=%s; ST=%s; L=%s; O=%s; CN=%s
-*   SSL certificate verify ok.`, cer.Subject.CommonName, cer.NotBefore, cer.NotAfter,
-				getFirst(cer.Issuer.Country), getFirst(cer.Issuer.Province), getFirst(cer.Issuer.Locality),
-				getFirst(cer.Issuer.Organization), cer.Issuer.CommonName)
-		}
-	}
-
+type traceOutput struct {
+	dnsHost            string
+	dnsDoneInfo        *httptrace.DNSDoneInfo
+	getConnHostPort    string
+	gotConnInfo        *httptrace.GotConnInfo
+	tlsConnectionState *tls.ConnectionState
+	tcpConnectAddr     string
 }
 
-func getFirst(s []string) string {
-	if len(s) > 0 {
-		return s[0]
+func (t *traceInfo) output() traceOutput {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return traceOutput{
+		dnsHost:            t.dnsHost,
+		dnsDoneInfo:        t.dnsDoneInfo,
+		getConnHostPort:    t.getConnHostPort,
+		gotConnInfo:        t.gotConnInfo,
+		tlsConnectionState: t.tlsConnectionState,
+		tcpConnectAddr:     t.tcpConnectAddr,
 	}
-	return ""
+}
+
+func (t *traceInfo) write(w io.Writer, requestHost string) {
+	output := t.output()
+	if output.dnsDoneInfo != nil {
+		host := resolvedHost(output.dnsHost, output.getConnHostPort)
+		if output.dnsDoneInfo.Err != nil {
+			write(w, "* Could not resolve host %s: %s", host, output.dnsDoneInfo.Err)
+		} else {
+			write(w, "* Host %s was resolved.", host)
+			for _, ipAddr := range output.dnsDoneInfo.Addrs {
+				if len(ipAddr.IP) == net.IPv4len {
+					write(w, "* IPv4: %s", ipAddr.IP)
+				}
+				if len(ipAddr.IP) == net.IPv6len {
+					write(w, "* IPv6: %s", ipAddr.IP)
+				}
+			}
+		}
+	}
+
+	connectionHost := connectedHost(output.getConnHostPort, requestHost)
+	if output.gotConnInfo != nil && output.gotConnInfo.Reused {
+		write(w, "* Reusing existing connection to %s", connectionHost)
+	} else if output.gotConnInfo != nil && output.gotConnInfo.Conn != nil {
+		remoteAddr := output.gotConnInfo.Conn.RemoteAddr().String()
+		tryingAddr := output.tcpConnectAddr
+		if tryingAddr == "" {
+			tryingAddr = remoteAddr
+		}
+		write(w, "*   Trying %s...", tryingAddr)
+		if ip, port, err := net.SplitHostPort(remoteAddr); err == nil {
+			write(w, "* Connected to %s (%s) port %s", connectionHost, ip, port)
+		} else {
+			write(w, "* Connected to %s (%s)", connectionHost, remoteAddr)
+		}
+	}
+
+	if output.tlsConnectionState != nil {
+		write(w, "* TLS connection using %s / %s",
+			tls.VersionName(output.tlsConnectionState.Version),
+			tls.CipherSuiteName(output.tlsConnectionState.CipherSuite),
+		)
+		if output.tlsConnectionState.NegotiatedProtocol != "" {
+			write(w, "* ALPN: server accepted %s", output.tlsConnectionState.NegotiatedProtocol)
+		}
+		if len(output.tlsConnectionState.VerifiedChains) > 0 &&
+			len(output.tlsConnectionState.VerifiedChains[0]) > 0 {
+			cer := output.tlsConnectionState.VerifiedChains[0][0]
+			write(w, `* Server certificate:
+*   subject: %s
+*   start date: %s
+*   expire date: %s
+*   issuer: %s
+*   SSL certificate verify ok.`, formatPKIXName(cer.Subject), cer.NotBefore.UTC().Format(time.RFC3339),
+				cer.NotAfter.UTC().Format(time.RFC3339), formatPKIXName(cer.Issuer))
+		}
+	}
+}
+
+func resolvedHost(dnsHost, hostPort string) string {
+	if dnsHost == "" {
+		return hostPort
+	}
+	host, _, err := net.SplitHostPort(hostPort)
+	if err == nil && strings.EqualFold(host, dnsHost) {
+		return hostPort
+	}
+	return dnsHost
+}
+
+func connectedHost(hostPort, fallback string) string {
+	host, _, err := net.SplitHostPort(hostPort)
+	if err == nil && host != "" {
+		return host
+	}
+	if hostPort != "" {
+		return hostPort
+	}
+	return fallback
+}
+
+func formatPKIXName(name pkix.Name) string {
+	parts := make([]string, 0, 6)
+	appendNamePart := func(key string, values []string) {
+		if len(values) > 0 && values[0] != "" {
+			parts = append(parts, key+"="+values[0])
+		}
+	}
+	appendNamePart("C", name.Country)
+	appendNamePart("ST", name.Province)
+	appendNamePart("L", name.Locality)
+	appendNamePart("O", name.Organization)
+	appendNamePart("OU", name.OrganizationalUnit)
+	if name.CommonName != "" {
+		parts = append(parts, "CN="+name.CommonName)
+	}
+	return strings.Join(parts, "; ")
 }
 
 func write(w io.Writer, format string, args ...any) {

@@ -259,6 +259,13 @@ func (c *Client) Do(req *http.Request, opts ...CallOption) (resp *http.Response,
 	if err != nil {
 		return nil, err
 	}
+	if !managed {
+		return response, nil
+	}
+	if response.Body == http.NoBody {
+		cancel()
+		return response, nil
+	}
 	response.Body = &cancelResponseBody{
 		ReadCloser: response.Body,
 		cancel:     cancel,

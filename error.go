@@ -3,6 +3,7 @@ package ghttp
 import (
 	"context"
 	"errors"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -64,7 +65,11 @@ func IsTimeout(err error) bool {
 	if err == nil {
 		return false
 	}
-	return errors.Is(err, context.DeadlineExceeded)
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
 }
 
 func StatusForErr(err error) (int, bool) {

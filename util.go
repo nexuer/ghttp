@@ -259,7 +259,8 @@ func EncodeRequestBody(req *http.Request, body any) error {
 // This function allows you to set or replace the body of the HTTP request with
 // the provided 'body' parameter. The body is expected to be an io.Reader, which
 // means it can be any type that implements the io.Reader interface, such as a
-// byte buffer or a file stream.
+// byte buffer or a file stream. If the request already has a body, it is closed
+// before being replaced.
 //
 // Example usage:
 //
@@ -278,8 +279,18 @@ func SetRequestBody(req *http.Request, body io.Reader) error {
 	if body == nil || req == nil {
 		return nil
 	}
+	if req.Body != nil {
+		if err := req.Body.Close(); err != nil {
+			return err
+		}
+	}
+
+	// Replacing Body invalidates metadata derived from the previous body.
+	req.GetBody = nil
+	req.ContentLength = 0
+
 	rc, ok := body.(io.ReadCloser)
-	if !ok && body != nil {
+	if !ok {
 		rc = io.NopCloser(body)
 	}
 	req.Body = rc
