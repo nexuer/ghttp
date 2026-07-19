@@ -18,17 +18,17 @@ type ClientOption func(*clientOptions)
 
 // Client is an HTTP transport client.
 type clientOptions struct {
-	transport      http.RoundTripper
-	tlsConf        *tls.Config
-	timeout        time.Duration
-	endpoint       string
-	userAgent      string
-	contentType    string
-	proxy          func(*http.Request) (*url.URL, error)
-	debugInterface func() DebugInterface
-	debug          bool
-	not2xxError    func() error
-	limiter        Limiter
+	transport   http.RoundTripper
+	tlsConf     *tls.Config
+	timeout     time.Duration
+	endpoint    string
+	userAgent   string
+	contentType string
+	proxy       func(*http.Request) (*url.URL, error)
+	debugger    func() Debugger
+	debug       bool
+	not2xxError func() error
+	limiter     Limiter
 }
 
 // WithLimiter sets a rate limiter for the client.
@@ -47,10 +47,10 @@ func WithNot2xxError(f func() error) ClientOption {
 	}
 }
 
-// WithDebugInterface sets the function to create a new DebugInterface instance.
-func WithDebugInterface(f func() DebugInterface) ClientOption {
+// WithDebugger sets the function to create a new Debugger instance.
+func WithDebugger(f func() Debugger) ClientOption {
 	return func(c *clientOptions) {
-		c.debugInterface = f
+		c.debugger = f
 	}
 }
 
@@ -180,12 +180,12 @@ func (c *Client) setHeader(req *http.Request) {
 	}
 }
 
-func (c *Client) debugger() DebugInterface {
+func (c *Client) newDebugger() Debugger {
 	if !c.opts.debug {
 		return nil
 	}
-	if c.opts.debugInterface != nil {
-		return c.opts.debugInterface()
+	if c.opts.debugger != nil {
+		return c.opts.debugger()
 	}
 	return &Debug{
 		Trace:  true,
@@ -277,15 +277,17 @@ func (c *Client) do(req *http.Request, opts ...CallOption) (*http.Response, erro
 		}
 	}
 
-	debugger := c.debugger()
+	debugger := c.newDebugger()
 
 	if debugger != nil {
-		debugger.Before(req)
+		if debugReq := debugger.Begin(req); debugReq != nil {
+			req = debugReq
+		}
 	}
 
 	response, err := c.hc.Do(req)
 	if debugger != nil {
-		debugger.After(req, response, err)
+		debugger.End(req, response, err)
 	}
 
 	if err != nil {
@@ -295,6 +297,7 @@ func (c *Client) do(req *http.Request, opts ...CallOption) (*http.Response, erro
 	// apply CallOption After
 	for _, callOpt := range opts {
 		if err = callOpt.After(response); err != nil {
+			closeResponseBody(response)
 			return nil, newError(req, response, err)
 		}
 	}
@@ -304,6 +307,12 @@ func (c *Client) do(req *http.Request, opts ...CallOption) (*http.Response, erro
 	}
 
 	return response, nil
+}
+
+func closeResponseBody(response *http.Response) {
+	if response != nil && response.Body != nil {
+		_ = response.Body.Close()
+	}
 }
 
 func (c *Client) bindNot2xxError(response *http.Response) error {

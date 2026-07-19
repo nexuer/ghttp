@@ -18,88 +18,91 @@ import (
 	"github.com/nexuer/ghttp/encoding"
 )
 
-type DebugInterface interface {
-	Before(request *http.Request)
-	After(request *http.Request, response *http.Response, err error)
+// Debugger observes a single HTTP request lifecycle. Begin may return a derived
+// request, which must be the request passed to both the transport and End.
+type Debugger interface {
+	Begin(request *http.Request) *http.Request
+	End(request *http.Request, response *http.Response, err error)
 }
 
 type Debug struct {
 	Writer        io.Writer
 	Trace         bool
 	TraceCallback func(w io.Writer, info TraceInfo)
-
-	traceInfo traceInfo
-	req       *http.Request
 }
 
-func (d *Debug) init() {
+func (d *Debug) writer() io.Writer {
 	if d.Writer == nil {
-		d.Writer = os.Stderr
+		return os.Stderr
 	}
+	return d.Writer
 }
 
-func (d *Debug) Before(req *http.Request) {
-	if d.Writer == nil {
-		d.Writer = os.Stderr
-	}
-	if d.Trace {
-		d.traceInfo.startTime = time.Now()
-		trace := &httptrace.ClientTrace{
-			DNSStart: func(info httptrace.DNSStartInfo) {
-				d.traceInfo.dnsStartTime = time.Now()
-				d.traceInfo.host = info.Host
-			},
-			DNSDone: func(dnsInfo httptrace.DNSDoneInfo) {
-				d.traceInfo.dnsDoneTime = time.Now()
-				d.traceInfo.dnsDoneInfo = &dnsInfo
-			},
-			GetConn: func(hostPort string) {
-				d.traceInfo.getConnTime = time.Now()
-				d.traceInfo.getConnHostPort = hostPort
-			},
-			GotConn: func(connInfo httptrace.GotConnInfo) {
-				d.traceInfo.gotConnTime = time.Now()
-				d.traceInfo.gotConnInfo = &connInfo
-			},
-			TLSHandshakeStart: func() {
-				d.traceInfo.tlsHandshakeStartTime = time.Now()
-			},
-			TLSHandshakeDone: func(state tls.ConnectionState, err error) {
-				d.traceInfo.tlsHandshakeDoneTime = time.Now()
-				d.traceInfo.tlsConnectionState = &state
-			},
-			GotFirstResponseByte: func() {
-				d.traceInfo.gotFirstResponseByteTime = time.Now()
-			},
-			WroteRequest: func(info httptrace.WroteRequestInfo) {
-				d.traceInfo.wroteRequestTime = time.Now()
-			},
-		}
+type debugStateKey struct{}
 
-		req = req.WithContext(httptrace.WithClientTrace(req.Context(), trace))
-	}
-
-	d.req = req
-}
-
-func (d *Debug) statTraceInfo(ctx context.Context) TraceInfo {
+func (d *Debug) Begin(req *http.Request) *http.Request {
 	if !d.Trace {
+		return req
+	}
+
+	state := &traceInfo{startTime: time.Now()}
+	trace := &httptrace.ClientTrace{
+		DNSStart: func(info httptrace.DNSStartInfo) {
+			state.dnsStartTime = time.Now()
+			state.host = info.Host
+		},
+		DNSDone: func(dnsInfo httptrace.DNSDoneInfo) {
+			state.dnsDoneTime = time.Now()
+			state.dnsDoneInfo = &dnsInfo
+		},
+		GetConn: func(hostPort string) {
+			state.getConnTime = time.Now()
+			state.getConnHostPort = hostPort
+		},
+		GotConn: func(connInfo httptrace.GotConnInfo) {
+			state.gotConnTime = time.Now()
+			state.gotConnInfo = &connInfo
+		},
+		TLSHandshakeStart: func() {
+			state.tlsHandshakeStartTime = time.Now()
+		},
+		TLSHandshakeDone: func(connectionState tls.ConnectionState, err error) {
+			state.tlsHandshakeDoneTime = time.Now()
+			state.tlsConnectionState = &connectionState
+		},
+		GotFirstResponseByte: func() {
+			state.gotFirstResponseByteTime = time.Now()
+		},
+		WroteRequest: func(info httptrace.WroteRequestInfo) {
+			state.wroteRequestTime = time.Now()
+		},
+	}
+
+	ctx := context.WithValue(req.Context(), debugStateKey{}, state)
+	ctx = httptrace.WithClientTrace(ctx, trace)
+	return req.WithContext(ctx)
+}
+
+func (d *Debug) statTraceInfo(ctx context.Context, state *traceInfo) TraceInfo {
+	if !d.Trace || state == nil {
 		return TraceInfo{}
 	}
 	return TraceInfo{
 		ctx:                  ctx,
-		DNSDuration:          d.traceInfo.dnsDoneTime.Sub(d.traceInfo.dnsStartTime),
-		ConnectDuration:      d.traceInfo.gotConnTime.Sub(d.traceInfo.getConnTime),
-		TLSHandshakeDuration: d.traceInfo.tlsHandshakeDoneTime.Sub(d.traceInfo.tlsHandshakeStartTime),
-		RequestDuration:      d.traceInfo.wroteRequestTime.Sub(d.traceInfo.gotConnTime),
-		WaitResponseDuration: d.traceInfo.gotFirstResponseByteTime.Sub(d.traceInfo.wroteRequestTime),
+		DNSDuration:          state.dnsDoneTime.Sub(state.dnsStartTime),
+		ConnectDuration:      state.gotConnTime.Sub(state.getConnTime),
+		TLSHandshakeDuration: state.tlsHandshakeDoneTime.Sub(state.tlsHandshakeStartTime),
+		RequestDuration:      state.wroteRequestTime.Sub(state.gotConnTime),
+		WaitResponseDuration: state.gotFirstResponseByteTime.Sub(state.wroteRequestTime),
 
-		ResponseDuration: d.traceInfo.responseDoneTime.Sub(d.traceInfo.gotFirstResponseByteTime),
-		TotalDuration:    d.traceInfo.responseDoneTime.Sub(d.traceInfo.startTime),
+		ResponseDuration: state.responseDoneTime.Sub(state.gotFirstResponseByteTime),
+		TotalDuration:    state.responseDoneTime.Sub(state.startTime),
 	}
 }
 
-func (d *Debug) After(request *http.Request, response *http.Response, err error) {
+func (d *Debug) End(request *http.Request, response *http.Response, err error) {
+	writer := d.writer()
+
 	// print request and response
 	path := request.URL.String()
 	if path == "" {
@@ -107,66 +110,75 @@ func (d *Debug) After(request *http.Request, response *http.Response, err error)
 	}
 
 	if d.Trace {
-		d.traceInfo.responseDoneTime = time.Now()
+		state, _ := request.Context().Value(debugStateKey{}).(*traceInfo)
+		if state != nil {
+			state.responseDoneTime = time.Now()
+		}
 		if d.TraceCallback != nil {
-			d.TraceCallback(d.Writer, d.statTraceInfo(request.Context()))
+			d.TraceCallback(writer, d.statTraceInfo(request.Context(), state))
 		}
-		if d.traceInfo.host == "" {
-			d.traceInfo.host = request.URL.Host
+		if state != nil {
+			if state.host == "" {
+				state.host = request.URL.Host
+			}
+			state.write(writer)
 		}
-		d.traceInfo.write(d.Writer)
 	}
 
-	write(d.Writer, "* using %s", request.Proto)
-	write(d.Writer, "> %s %s %s", request.Method, path, request.Proto)
+	write(writer, "* using %s", request.Proto)
+	write(writer, "> %s %s %s", request.Method, path, request.Proto)
 	// write request header
 	for k, v := range request.Header {
-		write(d.Writer, "> %s: %s", k, strings.Join(v, ","))
+		write(writer, "> %s: %s", k, strings.Join(v, ","))
 	}
 
 	// request body
 	if request.GetBody != nil {
 		if reqBodyReader, err := request.GetBody(); err == nil {
-			reqBody, _ := io.ReadAll(reqBodyReader)
-			codec, _ := CodecForRequest(request)
-			reqBodyBs, _ := formatIndent(codec, reqBody)
-			if len(reqBodyBs) > 0 {
-				write(d.Writer, "")
-				write(d.Writer, "%s", string(reqBodyBs))
+			reqBody, readErr := io.ReadAll(reqBodyReader)
+			_ = reqBodyReader.Close()
+			if readErr == nil {
+				codec, _ := CodecForRequest(request)
+				reqBodyBs, _ := formatIndent(codec, reqBody)
+				if len(reqBodyBs) > 0 {
+					write(writer, "")
+					write(writer, "%s", string(reqBodyBs))
+				}
 			}
 		}
 	} else {
-		write(d.Writer, ">")
+		write(writer, ">")
 	}
 
 	if response != nil {
-		write(d.Writer, "")
+		write(writer, "")
 		// response
-		write(d.Writer, "< %s %s", response.Proto, response.Status)
+		write(writer, "< %s %s", response.Proto, response.Status)
 		for k, v := range response.Header {
-			write(d.Writer, "< %s: %s", k, strings.Join(v, ","))
+			write(writer, "< %s: %s", k, strings.Join(v, ","))
 		}
 		// response body
 		if response.Body != nil && response.Body != http.NoBody {
-			//resBodyReader := io.Reader(response.Body)
-			if responseBody, err := io.ReadAll(response.Body); err == nil {
-				response.Body = io.NopCloser(bytes.NewBuffer(responseBody))
+			originalBody := response.Body
+			if responseBody, err := io.ReadAll(originalBody); err == nil {
+				_ = originalBody.Close()
+				response.Body = io.NopCloser(bytes.NewReader(responseBody))
 				codec, _ := CodecForResponse(response)
 				resBodyBs, _ := formatIndent(codec, responseBody)
 				if len(resBodyBs) > 0 {
-					write(d.Writer, "")
-					write(d.Writer, "%s", string(resBodyBs))
+					write(writer, "")
+					write(writer, "%s", string(resBodyBs))
 				} else {
-					write(d.Writer, "")
-					write(d.Writer, "%s", string(responseBody))
+					write(writer, "")
+					write(writer, "%s", string(responseBody))
 				}
 			}
 		}
 	}
 
 	if err != nil {
-		write(d.Writer, "")
-		write(d.Writer, "** ERROR: %s", err)
+		write(writer, "")
+		write(writer, "** ERROR: %s", err)
 	}
 }
 

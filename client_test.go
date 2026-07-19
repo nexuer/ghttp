@@ -20,12 +20,6 @@ func TestClient_Do(t *testing.T) {
 		WithNot2xxError(func() error {
 			return &gitlabErr{}
 		}),
-		//WithDebugInterface(func() DebugInterface {
-		//	return &Debug{
-		//		Trace:  false,
-		//		Writer: os.Stdout,
-		//	}
-		//}),
 	}
 	c := NewClient(opts...)
 
