@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sync"
 	"time"
 )
 
@@ -196,13 +197,13 @@ func (c *Client) newDebugger() Debugger {
 	}
 }
 
-func (c *Client) Invoke(ctx context.Context, method, path string, args any, reply any, opts ...CallOption) (*http.Response, error) {
-	// set timeout, Do() is not set repeatedly and does not trigger defer()
+func (c *Client) Invoke(ctx context.Context, method, path string, args any, reply any,
+	opts ...CallOption) (resp *http.Response, err error) {
 	ctx, cancel, _ := c.setTimeout(ctx)
 	defer cancel()
 
 	if c.opts.limiter != nil {
-		if err := c.opts.limiter.Wait(ctx); err != nil {
+		if err = c.opts.limiter.Wait(ctx); err != nil {
 			return nil, err
 		}
 	}
@@ -230,25 +231,39 @@ func (c *Client) Invoke(ctx context.Context, method, path string, args any, repl
 	return response, nil
 }
 
-// Do send an HTTP request and decodes the body of response into target.
-func (c *Client) Do(req *http.Request, opts ...CallOption) (*http.Response, error) {
+// Do sends an HTTP request.
+func (c *Client) Do(req *http.Request, opts ...CallOption) (resp *http.Response, err error) {
 	if req == nil {
 		return nil, errors.New("http: nil http request")
 	}
 
 	// set timeout
-	ctx, cancel, ok := c.setTimeout(req.Context())
-	if ok {
-		defer cancel()
+	ctx, cancel, managed := c.setTimeout(req.Context())
+	if managed {
 		req = req.WithContext(ctx)
 	}
 
+	defer func() {
+		if err != nil && managed {
+			cancel()
+		}
+	}()
+
 	if c.opts.limiter != nil {
-		if err := c.opts.limiter.Wait(ctx); err != nil {
+		if err = c.opts.limiter.Wait(ctx); err != nil {
 			return nil, err
 		}
 	}
-	return c.do(req, opts...)
+
+	response, err := c.do(req, opts...)
+	if err != nil {
+		return nil, err
+	}
+	response.Body = &cancelResponseBody{
+		ReadCloser: response.Body,
+		cancel:     cancel,
+	}
+	return response, nil
 }
 
 func (c *Client) do(req *http.Request, opts ...CallOption) (*http.Response, error) {
@@ -313,6 +328,26 @@ func closeResponseBody(response *http.Response) {
 	if response != nil && response.Body != nil {
 		_ = response.Body.Close()
 	}
+}
+
+type cancelResponseBody struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+	once   sync.Once
+}
+
+func (b *cancelResponseBody) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	if err != nil {
+		b.once.Do(b.cancel)
+	}
+	return n, err
+}
+
+func (b *cancelResponseBody) Close() error {
+	err := b.ReadCloser.Close()
+	b.once.Do(b.cancel)
+	return err
 }
 
 func (c *Client) bindNot2xxError(response *http.Response) error {

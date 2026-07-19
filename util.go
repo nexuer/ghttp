@@ -184,11 +184,16 @@ func SetQuery(req *http.Request, q any) error {
 //	}
 //	// The 'userResponse' struct will now be populated with the decoded response data.
 func BindResponseBody(resp *http.Response, target any) error {
+	if resp == nil || resp.Body == nil {
+		return fmt.Errorf("response: nil body")
+	}
+	defer resp.Body.Close()
+
 	if target == nil {
 		return nil
 	}
 
-	if resp.Body == nil || resp.Body == http.NoBody {
+	if resp.Body == http.NoBody {
 		return fmt.Errorf("response: no body")
 	}
 
@@ -198,7 +203,6 @@ func BindResponseBody(resp *http.Response, target any) error {
 			resp.Header.Get("Content-Type"))
 	}
 
-	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return err
