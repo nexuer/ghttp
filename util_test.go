@@ -1,6 +1,8 @@
 package ghttp
 
-import "testing"
+import (
+	"testing"
+)
 
 func TestEndpoint(t *testing.T) {
 	tests := []struct {
@@ -66,6 +68,10 @@ func TestSubContentType(t *testing.T) {
 		{
 			contentType: "text/plain; charset=utf-8",
 			want:        "plain",
+		},
+		{
+			contentType: "APPLICATION/VND.API+JSON",
+			want:        "json",
 		},
 	}
 

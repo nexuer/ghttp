@@ -17,6 +17,7 @@ import (
 var codecAliases = map[string]string{
 	"x-protobuf": proto.Name,
 	"x-yaml":     yaml.Name,
+	"*":          json.Name,
 }
 
 func codecForSubtype(subtype string) encoding.Codec {
@@ -43,7 +44,8 @@ func RegisterCodec(contentType string, codec encoding.Codec) {
 	registerCodecName(contentType, codec.Name())
 }
 
-// CodecForContentType returns the codec registered for an HTTP content type.
+// CodecForContentType returns the codec registered for an HTTP content type, or
+// nil when the content type is invalid or unsupported.
 func CodecForContentType(contentType string) encoding.Codec {
 	return codecForSubtype(subContentType(contentType))
 }

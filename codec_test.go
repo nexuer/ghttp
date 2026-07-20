@@ -49,6 +49,10 @@ func TestCodecForContentType(t *testing.T) {
 			contentType: "application/vnd.docker.distribution.manifest.v2+json; charset=utf-8",
 			want:        "json",
 		},
+		{
+			contentType: "APPLICATION/VND.API+JSON",
+			want:        "json",
+		},
 
 		// xml
 		{
@@ -66,6 +70,10 @@ func TestCodecForContentType(t *testing.T) {
 			want:        "yaml",
 		},
 		{
+			contentType: "APPLICATION/X-YAML",
+			want:        "yaml",
+		},
+		{
 			contentType: "text/yaml",
 			want:        "yaml",
 		},
@@ -74,6 +82,20 @@ func TestCodecForContentType(t *testing.T) {
 		{
 			contentType: "application/x-protobuf",
 			want:        "proto",
+		},
+
+		// wildcard alias
+		{
+			contentType: "application/*",
+			want:        "json",
+		},
+		{
+			contentType: "*/*",
+			want:        "json",
+		},
+		{
+			contentType: "image/avif",
+			want:        "",
 		},
 	}
 
@@ -102,6 +124,21 @@ func TestRegisterCodecContentTypeAlias(t *testing.T) {
 	}
 	if got.Name() != codec.Name() {
 		t.Fatalf("CodecForContentType() codec = %q; want %q", got.Name(), codec.Name())
+	}
+}
+
+func TestRegisterCodecContentTypeAliasIsCaseInsensitive(t *testing.T) {
+	codec := namedTestCodec{name: "Case-Insensitive-Test-Codec"}
+	RegisterCodec("application/VND.GHTTP-CASE", codec)
+
+	for _, contentType := range []string{
+		"application/VND.GHTTP-CASE",
+		"APPLICATION/vnd.ghttp-case",
+	} {
+		got := CodecForContentType(contentType)
+		if got == nil || got.Name() != codec.Name() {
+			t.Fatalf("CodecForContentType(%q) codec = %v; want %q", contentType, got, codec.Name())
+		}
 	}
 }
 

@@ -29,9 +29,9 @@ func subContentType(contentType string) string {
 	sct := contentType[left+1 : right]
 	left = strings.Index(sct, "+")
 	if left >= 0 {
-		return sct[left+1:]
+		sct = sct[left+1:]
 	}
-	return sct
+	return strings.ToLower(sct)
 }
 
 // ProxyURL returns a function that sets a proxy URL for the given HTTP request.
