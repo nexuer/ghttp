@@ -2,7 +2,7 @@ package yaml
 
 import (
 	"github.com/nexuer/ghttp/encoding"
-	"gopkg.in/yaml.v3"
+	"go.yaml.in/yaml/v3"
 )
 
 // Name is the name registered for the yaml codec.

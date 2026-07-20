@@ -9,12 +9,14 @@ import (
 	"strings"
 )
 
+// Error describes a failed HTTP request and wraps its underlying error.
 type Error struct {
 	// The http status code returned.
 	StatusCode int
 	// The request that failed.
 	Request *http.Request
 
+	// Err is the underlying error.
 	Err error
 }
 
@@ -29,6 +31,7 @@ func newError(req *http.Request, response *http.Response, err error) *Error {
 	return e
 }
 
+// Error returns a description of the failed request.
 func (e *Error) Error() string {
 	if e == nil {
 		return "<nil>"
@@ -60,6 +63,7 @@ func (e *Error) Error() string {
 	return buf.String()
 }
 
+// Unwrap returns the underlying error.
 func (e *Error) Unwrap() error {
 	if e == nil {
 		return nil
@@ -67,6 +71,7 @@ func (e *Error) Unwrap() error {
 	return e.Err
 }
 
+// IsTimeout reports whether err represents a context or network timeout.
 func IsTimeout(err error) bool {
 	if err == nil {
 		return false
@@ -78,6 +83,7 @@ func IsTimeout(err error) bool {
 	return errors.As(err, &netErr) && netErr.Timeout()
 }
 
+// FromError finds the first *Error in err's unwrap chain.
 func FromError(err error) (*Error, bool) {
 	var e *Error
 	if !errors.As(err, &e) || e == nil {
@@ -86,6 +92,7 @@ func FromError(err error) (*Error, bool) {
 	return e, true
 }
 
+// StatusCode returns the HTTP status code carried by an *Error.
 func StatusCode(err error) (int, bool) {
 	e, ok := FromError(err)
 	if !ok {

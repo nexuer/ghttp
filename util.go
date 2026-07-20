@@ -82,6 +82,7 @@ func not2xxCode(code int) bool {
 	return code < 200 || code > 299
 }
 
+// Endpoint trims endpoint and adds an HTTP scheme when it has none.
 func Endpoint(endpoint string) string {
 	endpoint = strings.TrimSpace(endpoint)
 	if endpoint == "" {

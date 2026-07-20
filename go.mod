@@ -1,10 +1,9 @@
 module github.com/nexuer/ghttp
 
-go 1.21
+go 1.23
 
 require (
 	github.com/google/go-cmp v0.7.0
-	google.golang.org/protobuf v1.35.2
-	gopkg.in/yaml.v3 v3.0.1
+	go.yaml.in/yaml/v3 v3.0.4
+	google.golang.org/protobuf v1.36.11
 )
-

@@ -32,8 +32,11 @@ type Debugger interface {
 // Debug writes curl-style request, response, and optional network trace output.
 // It does not pre-read streaming bodies.
 type Debug struct {
-	Writer        io.Writer
-	Trace         bool
+	// Writer receives debug output. The default is os.Stderr.
+	Writer io.Writer
+	// Trace enables network timing collection.
+	Trace bool
+	// TraceCallback receives the collected timing information.
 	TraceCallback func(w io.Writer, info TraceInfo)
 
 	// RequestBodyLimit is the maximum number of replayable text request body
@@ -58,6 +61,7 @@ func (d *Debug) writer() io.Writer {
 
 type debugStateKey struct{}
 
+// Begin attaches network tracing to req when tracing is enabled.
 func (d *Debug) Begin(req *http.Request) *http.Request {
 	if !d.Trace {
 		return req
@@ -213,6 +217,7 @@ func traceDuration(start, end time.Time) (time.Duration, bool) {
 	return end.Sub(start), true
 }
 
+// End writes request and response details after the transport returns.
 func (d *Debug) End(request *http.Request, response *http.Response, err error) {
 	writer := d.writer()
 
@@ -527,18 +532,28 @@ func (b *debugResponseBody) finish(closedEarly bool, readErr error) {
 	})
 }
 
+// TraceInfo contains timing information collected for one HTTP request.
 type TraceInfo struct {
 	ctx context.Context
 
-	DNSDuration          time.Duration `json:"DNSDuration,omitempty" yaml:"DNSDuration" xml:"DNSDuration"`
-	ConnectDuration      time.Duration `json:"connectDuration,omitempty" yaml:"connectDuration" xml:"connectDuration"`
-	TCPConnectDuration   time.Duration `json:"tcpConnectDuration,omitempty" yaml:"tcpConnectDuration" xml:"tcpConnectDuration"`
+	// DNSDuration is the duration of DNS resolution.
+	DNSDuration time.Duration `json:"DNSDuration,omitempty" yaml:"DNSDuration" xml:"DNSDuration"`
+	// ConnectDuration is the time spent acquiring a connection.
+	ConnectDuration time.Duration `json:"connectDuration,omitempty" yaml:"connectDuration" xml:"connectDuration"`
+	// TCPConnectDuration is the duration of establishing a TCP connection.
+	TCPConnectDuration time.Duration `json:"tcpConnectDuration,omitempty" yaml:"tcpConnectDuration" xml:"tcpConnectDuration"`
+	// TLSHandshakeDuration is the duration of the TLS handshake.
 	TLSHandshakeDuration time.Duration `json:"TLSHandshakeDuration,omitempty" yaml:"TLSHandshakeDuration" xml:"TLSHandshakeDuration"`
-	RequestDuration      time.Duration `json:"requestDuration,omitempty" yaml:"requestDuration" xml:"requestDuration"`
+	// RequestDuration is the time spent writing the request.
+	RequestDuration time.Duration `json:"requestDuration,omitempty" yaml:"requestDuration" xml:"requestDuration"`
+	// WaitResponseDuration is the time from writing the request to the first response byte.
 	WaitResponseDuration time.Duration `json:"waitResponseDuration,omitempty" yaml:"waitResponseDuration" xml:"waitResponseDuration"`
-	ResponseDuration     time.Duration `json:"responseDuration,omitempty" yaml:"responseDuration" xml:"responseDuration"`
-	TotalDuration        time.Duration `json:"totalDuration,omitempty" yaml:"totalDuration" xml:"totalDuration"`
-	ConnectionReused     bool          `json:"connectionReused,omitempty" yaml:"connectionReused" xml:"connectionReused"`
+	// ResponseDuration is the time from the first response byte until the headers are available.
+	ResponseDuration time.Duration `json:"responseDuration,omitempty" yaml:"responseDuration" xml:"responseDuration"`
+	// TotalDuration is the time from tracing start until the response headers are available.
+	TotalDuration time.Duration `json:"totalDuration,omitempty" yaml:"totalDuration" xml:"totalDuration"`
+	// ConnectionReused reports whether the transport reused an existing connection.
+	ConnectionReused bool `json:"connectionReused,omitempty" yaml:"connectionReused" xml:"connectionReused"`
 
 	dnsDurationSet          bool
 	connectDurationSet      bool
@@ -551,14 +566,17 @@ type TraceInfo struct {
 	connectionReusedSet     bool
 }
 
+// Context returns the request context associated with the trace.
 func (t TraceInfo) Context() context.Context {
 	return t.ctx
 }
 
+// String returns the trace as a formatted timing table.
 func (t TraceInfo) String() string {
 	return string(t.Table())
 }
 
+// Table returns the trace as a formatted timing table.
 func (t TraceInfo) Table() []byte {
 	var buf bytes.Buffer
 	w := tabwriter.NewWriter(&buf, 24, 0, 3, ' ', tabwriter.TabIndent)

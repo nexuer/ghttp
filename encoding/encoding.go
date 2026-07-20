@@ -2,8 +2,7 @@ package encoding
 
 import "strings"
 
-// Codec defines the interface Transport uses to encode and decode messages.  Note
-// that implementations of this interface must be thread safe; a Codec's
+// Codec encodes and decodes messages. Implementations must be thread safe; a Codec's
 // methods can be called from concurrent goroutines.
 type Codec interface {
 	// Marshal returns the wire format of v.
@@ -18,6 +17,8 @@ type Codec interface {
 
 var registeredCodecs = make(map[string]Codec)
 
+// RegisterCodec registers codec by its lower-cased name. Registration must be
+// completed before codecs are accessed concurrently.
 func RegisterCodec(codec Codec) {
 	if codec == nil {
 		panic("cannot register a nil Codec")
@@ -29,6 +30,7 @@ func RegisterCodec(codec Codec) {
 	registeredCodecs[contentSubtype] = codec
 }
 
+// GetCodec returns the codec registered under name, or nil when none exists.
 func GetCodec(name string) Codec {
 	return registeredCodecs[name]
 }

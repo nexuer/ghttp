@@ -14,7 +14,7 @@ import (
 	"time"
 )
 
-// ClientOption is HTTP client option.
+// ClientOption configures a Client.
 type ClientOption func(*clientOptions)
 
 // Client is an HTTP transport client.
@@ -40,7 +40,7 @@ func WithLimiter(l Limiter) ClientOption {
 	}
 }
 
-// WithNot2xxError handle response status code < 200 and code > 299
+// WithNot2xxError sets a factory for errors decoded from non-2xx responses.
 func WithNot2xxError(f func() error) ClientOption {
 	return func(c *clientOptions) {
 		c.not2xxError = f
@@ -79,21 +79,21 @@ func WithTLSConfig(cfg *tls.Config) ClientOption {
 	}
 }
 
-// WithTimeout with client request timeout.
+// WithTimeout sets the default end-to-end timeout for each request.
 func WithTimeout(timeout time.Duration) ClientOption {
 	return func(c *clientOptions) {
 		c.timeout = timeout
 	}
 }
 
-// WithUserAgent with client user agent.
+// WithUserAgent sets the default User-Agent header.
 func WithUserAgent(userAgent string) ClientOption {
 	return func(c *clientOptions) {
 		c.userAgent = userAgent
 	}
 }
 
-// WithEndpoint with client addr.
+// WithEndpoint sets the base endpoint used for relative request paths.
 func WithEndpoint(endpoint string) ClientOption {
 	return func(c *clientOptions) {
 		c.endpoint = endpoint
@@ -117,13 +117,15 @@ func WithProxy(f func(*http.Request) (*url.URL, error)) ClientOption {
 	}
 }
 
-// Client is an HTTP client.
+// Client sends HTTP requests and encodes or decodes their bodies. A Client may
+// be reused concurrently after it has been configured.
 type Client struct {
 	opts           clientOptions
 	hc             *http.Client
 	contentSubType string
 }
 
+// NewClient creates a Client with the supplied options.
 func NewClient(opts ...ClientOption) *Client {
 	options := clientOptions{
 		contentType: "application/json",
@@ -159,6 +161,9 @@ func NewClient(opts ...ClientOption) *Client {
 	}
 }
 
+// SetEndpoint changes the base endpoint used for relative request paths.
+// It must not be called concurrently with Invoke or Do; set it before sharing
+// the Client between goroutines.
 func (c *Client) SetEndpoint(endpoint string) {
 	c.opts.endpoint = endpoint
 }
@@ -216,6 +221,8 @@ func (c *Client) newDebugger() Debugger {
 	}
 }
 
+// Invoke sends a request and decodes its response body into reply. It closes
+// the response body before returning.
 func (c *Client) Invoke(ctx context.Context, method, path string, args any, reply any,
 	opts ...CallOption) (resp *http.Response, err error) {
 	ctx, cancel, _ := c.setTimeout(ctx)
