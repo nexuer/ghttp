@@ -23,12 +23,14 @@ import (
 )
 
 // Debugger observes a single HTTP request lifecycle. Begin may return a derived
-// request, which must be the request passed to both the transport and End.
+// request. Pass the returned request to both the transport and End.
 type Debugger interface {
 	Begin(request *http.Request) *http.Request
 	End(request *http.Request, response *http.Response, err error)
 }
 
+// Debug writes curl-style request, response, and optional network trace output.
+// It does not pre-read streaming bodies.
 type Debug struct {
 	Writer        io.Writer
 	Trace         bool

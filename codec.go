@@ -13,7 +13,7 @@ import (
 )
 
 // codecAliases maps HTTP content subtypes to differently named codecs.
-// Registration must be completed before codecs are used concurrently.
+// Register codecs before they are used concurrently.
 var codecAliases = map[string]string{
 	"x-protobuf": proto.Name,
 	"x-yaml":     yaml.Name,
@@ -34,7 +34,7 @@ func registerCodecName(contentType string, name string) {
 }
 
 // RegisterCodec registers a codec and associates it with a content type.
-// It must be called before codecs are used concurrently.
+// Call it before codecs are used concurrently.
 func RegisterCodec(contentType string, codec encoding.Codec) {
 	if codec == nil {
 		return

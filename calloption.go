@@ -1,163 +1,90 @@
 package ghttp
 
-import (
-	"context"
-	"net/http"
-)
+import "net/http"
 
-type Limiter interface {
-	Wait(ctx context.Context) error
+// CallOption configures one client call.
+type CallOption func(*callOptions)
+
+// BeforeHook runs after structured request options are applied and before the
+// request is sent.
+type BeforeHook func(request *http.Request) error
+
+// AfterHook runs after a response is received and before it is processed.
+type AfterHook func(response *http.Response) error
+
+type callOptions struct {
+	contentType string
+	query       any
+	applyAuth   func(*http.Request)
+	beforeHooks []BeforeHook
+	afterHooks  []AfterHook
 }
 
-type CallOption interface {
-	Before(request *http.Request) error
-	After(response *http.Response) error
+func resolveCallOptions(opts ...CallOption) *callOptions {
+	options := new(callOptions)
+	for _, opt := range opts {
+		if opt != nil {
+			opt(options)
+		}
+	}
+	return options
 }
 
+// Query sets query parameters for one call. The last non-nil Query wins.
 func Query(q any) CallOption {
-	return queryCallOption{query: q}
+	return func(o *callOptions) {
+		if q != nil {
+			o.query = q
+		}
+	}
 }
 
-type queryCallOption struct {
-	query any
+// ContentType overrides Content-Type and Accept for one call. Invoke also uses
+// it to select the request body codec.
+func ContentType(contentType string) CallOption {
+	return func(o *callOptions) {
+		if contentType != "" {
+			o.contentType = contentType
+		}
+	}
 }
 
-func (q queryCallOption) Before(request *http.Request) error {
-	return SetQuery(request, q.query)
-}
-
-func (q queryCallOption) After(response *http.Response) error {
-	return nil
-}
-
+// BasicAuth configures HTTP Basic Authentication. The last non-empty auth
+// option wins.
 func BasicAuth(username, password string) CallOption {
-	return basicAuthCallOption{username, password}
-}
-
-type basicAuthCallOption struct {
-	username string
-	password string
-}
-
-func (b basicAuthCallOption) Before(request *http.Request) error {
-	if b.username != "" || b.password != "" {
-		request.SetBasicAuth(b.username, b.password)
+	return func(o *callOptions) {
+		if username == "" && password == "" {
+			return
+		}
+		o.applyAuth = func(request *http.Request) {
+			request.SetBasicAuth(username, password)
+		}
 	}
-	return nil
 }
 
-func (b basicAuthCallOption) After(response *http.Response) error {
-	return nil
-}
-
+// BearerToken configures bearer token authentication. The last non-empty auth
+// option wins.
 func BearerToken(token string) CallOption {
-	return bearerTokenCallOption{token}
-}
-
-type bearerTokenCallOption struct {
-	token string
-}
-
-func (b bearerTokenCallOption) Before(request *http.Request) error {
-	if b.token != "" {
-		request.Header.Set("Authorization", "Bearer "+b.token)
-	}
-	return nil
-}
-
-func (b bearerTokenCallOption) After(response *http.Response) error {
-	return nil
-}
-
-func Before(hooks ...RequestFunc) CallOption {
-	return beforeHooksCallOption{hooks}
-}
-
-type beforeHooksCallOption struct {
-	hooks []RequestFunc
-}
-
-func (b beforeHooksCallOption) Before(request *http.Request) error {
-	for _, f := range b.hooks {
-		if err := f(request); err != nil {
-			return err
+	return func(o *callOptions) {
+		if token == "" {
+			return
+		}
+		o.applyAuth = func(request *http.Request) {
+			request.Header.Set("Authorization", "Bearer "+token)
 		}
 	}
-	return nil
 }
 
-func (b beforeHooksCallOption) After(response *http.Response) error {
-	return nil
-}
-
-func After(hooks ...ResponseFunc) CallOption {
-	return afterHooksCallOption{hooks}
-}
-
-type afterHooksCallOption struct {
-	hooks []ResponseFunc
-}
-
-func (b afterHooksCallOption) Before(request *http.Request) error {
-	return nil
-}
-
-func (b afterHooksCallOption) After(response *http.Response) error {
-	for _, f := range b.hooks {
-		if err := f(response); err != nil {
-			return err
-		}
+// Before appends hooks that run before the request is sent.
+func Before(hooks ...BeforeHook) CallOption {
+	return func(o *callOptions) {
+		o.beforeHooks = append(o.beforeHooks, hooks...)
 	}
-	return nil
 }
 
-type RequestFunc func(request *http.Request) error
-type ResponseFunc func(response *http.Response) error
-
-// CallOptions default call options
-type CallOptions struct {
-	// Set query parameters
-	Query any
-
-	// Basic auth
-	Username string
-	Password string
-
-	// Bearer token
-	BearerToken string
-
-	// hooks
-	BeforeHooks []RequestFunc
-	AfterHooks  []ResponseFunc
-}
-
-func (c *CallOptions) Before(request *http.Request) error {
-	for _, f := range c.BeforeHooks {
-		if err := f(request); err != nil {
-			return err
-		}
+// After appends hooks that run after a response is received.
+func After(hooks ...AfterHook) CallOption {
+	return func(o *callOptions) {
+		o.afterHooks = append(o.afterHooks, hooks...)
 	}
-
-	if err := SetQuery(request, c.Query); err != nil {
-		return err
-	}
-
-	if c.Username != "" || c.Password != "" {
-		request.SetBasicAuth(c.Username, c.Password)
-	}
-
-	if c.BearerToken != "" {
-		request.Header.Set("Authorization", "Bearer "+c.BearerToken)
-	}
-
-	return nil
-}
-
-func (c *CallOptions) After(response *http.Response) error {
-	for _, f := range c.AfterHooks {
-		if err := f(response); err != nil {
-			return err
-		}
-	}
-	return nil
 }

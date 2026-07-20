@@ -24,7 +24,7 @@ var (
 
 // SetScopeJoiner sets the process-wide joiner used for nested struct fields and
 // map keys. It is safe to call concurrently with Values; each Values call uses
-// one snapshot of the joiner. The joiner itself must be safe for concurrent use.
+// one snapshot of the joiner. The joiner is responsible for concurrent safety.
 // Passing nil restores the default bracket notation.
 func SetScopeJoiner(sj ScopeJoiner) {
 	if sj == nil {

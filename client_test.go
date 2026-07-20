@@ -3,7 +3,6 @@ package ghttp
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -49,9 +48,7 @@ func TestClient_Do(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp, err := client.Do(req, &CallOptions{
-		Query: map[string]interface{}{"membership": true},
-	})
+	resp, err := client.Do(req, Query(map[string]interface{}{"membership": true}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -151,6 +148,20 @@ func TestInvokeLimiterDoesNotRunWhenBodyMarshalFails(t *testing.T) {
 	}
 }
 
+func TestInvokeLimiterDoesNotRunForUnsupportedContentType(t *testing.T) {
+	limiter := &countingLimiter{}
+	client := NewClient(WithLimiter(limiter))
+
+	_, err := client.Invoke(context.Background(), http.MethodPost, "http://example.test",
+		"body", nil, ContentType("application/unsupported"))
+	if err == nil {
+		t.Fatal("Invoke() error = nil; want unsupported content type error")
+	}
+	if got := limiter.calls.Load(); got != 0 {
+		t.Fatalf("limiter Wait calls = %d; want 0", got)
+	}
+}
+
 func TestInvokeLimiterDoesNotRunWhenRequestCreationFails(t *testing.T) {
 	limiter := &countingLimiter{}
 	client := NewClient(WithLimiter(limiter))
@@ -222,25 +233,21 @@ func TestLimiterDoesNotRunWhenBeforeHookFails(t *testing.T) {
 }
 
 func TestTextPlain(t *testing.T) {
-	// global
-	client := NewClient(
-		WithDebug(true),
-	)
-	// The default json is used again
-	fmt.Println("---------------------------------- Invoke ----------------------------------")
+	client := NewClient()
+	wantErr := `Get "/path": unsupported protocol scheme ""`
+
 	_, err := client.Invoke(context.Background(), http.MethodGet, "/path", "text data", nil)
-	if err != nil && err.Error() != `Get "/path": unsupported protocol scheme ""` {
-		t.Fatal(err)
+	if err == nil || err.Error() != wantErr {
+		t.Fatalf("Invoke() error = %v; want %q", err, wantErr)
 	}
-	fmt.Println("---------------------------------- Do ----------------------------------")
-	// If you need to use the 'text/plain 'type for just one request, you can only use Do()
+
 	req, err := http.NewRequest(http.MethodGet, "/path", strings.NewReader("text data"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	req.Header.Set("Content-Type", "text/plain")
 	_, err = client.Do(req)
-	if err != nil && err.Error() != `Get "/path": unsupported protocol scheme ""` {
-		t.Fatal(err)
+	if err == nil || err.Error() != wantErr {
+		t.Fatalf("Do() error = %v; want %q", err, wantErr)
 	}
 }

@@ -39,7 +39,7 @@ fmt.Println(values.Encode())
 
 非 nil 指针会被逐层解引用。
 
-顶层 slice/array 的元素数量必须是偶数：
+顶层 slice/array 要求包含偶数个元素：
 
 ```go
 query.Values([]any{"name", "alice", "page", 2})

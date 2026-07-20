@@ -39,7 +39,7 @@ fmt.Println(values.Encode())
 
 Non-nil pointers are dereferenced recursively.
 
-A top-level slice or array must contain an even number of elements:
+A top-level slice or array requires an even number of elements:
 
 ```go
 query.Values([]any{"name", "alice", "page", 2})
@@ -167,7 +167,7 @@ query.SetScopeJoiner(func(scope, name string) string {
 
 `SetScopeJoiner` may be called concurrently with `Values`. Each `Values` call uses one joiner snapshot. Passing `nil` restores the default bracket notation.
 
-A custom joiner may be invoked concurrently by multiple `Values` calls. If the callback accesses mutable state, it must provide its own synchronization.
+A custom joiner may be invoked concurrently by multiple `Values` calls. A callback that accesses mutable state is responsible for its own synchronization.
 
 ## Errors
 

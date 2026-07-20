@@ -1,148 +1,227 @@
 # ghttp
+
+English | [简体中文](./README_zh-CN.md)
+
 A Go HTTP client designed for quick integration with REST APIs.
 
 ## Installation
+
 ```shell
 go get github.com/nexuer/ghttp
 ```
-## Usage
 
-### Options
-#### Configure the HTTP roundTripper
-
-`WithTransport(trans http.RoundTripper)`
-```go
-// Example: Configure proxy and client certificates
-ghttp.WithTransport(&http.Transport{
-    Proxy: ghttp.ProxyURL(":7890"), // or http.ProxyFromEnvironment
-    TLSClientConfig: &tls.Config{
-        InsecureSkipVerify: true,
-    },
-}),
-```
-#### Set Default Timeout
-
-`WithTimeout(d time.Duration)`
-```go
-// Example: Set a specific timeout
-ctx, cancel := context.WithTimeout(context.Background(), 10 * time.Second)
-defer cancel()
-_, err := client.Invoke(ctx, http.MethodGet, "/api/v4/projects", nil, nil)
-```
-#### Set Default User-Agent
-
-`WithUserAgent(userAgent string)`
-
-#### Set Default Endpoint
-
-`WithEndpoint(endpoint string)`
-
-#### Set Default Content-Type
-`WithContentType(contentType string)`
-
-#### Configure Proxy
-> Default: http.ProxyFromEnvironment, can use `ghttp.ProxyURL(url)`
-
-`WithProxy(f func(*http.Request) (*url.URL, error))`
-
-#### Bind Struct for Non-2xx Status Codes
-`WithNot2xxError(f func() error)`
-
-#### Enable Debugging
-`WithDebug(open bool)`
-
-#### Set Limiter
-`WithLimiter(l Limiter)`
-
-### Invocation Methods
-
-- `Invoke(ctx context.Context, method, path string, args any, reply any, opts ...CallOption) (*http.Response, error)`
-- `Do(req *http.Request, opts ...CallOption) (*http.Response, error)`
-
-`CallOption` is an interface that allows customization through method implementation:
+## Quick Start
 
 ```go
-type CallOption interface {
-    Before(request *http.Request) error
-    After(response *http.Response) error
-}
-```
-
-### Binding 
-#### Request Query
-[usage](./query/README.md)
-
-#### Encoding
-> Automatically loads the corresponding Codec instance based on content-type. Subtype extraction occurs (e.g., both application/json and application/vnd.api+json are treated as json).
-
-Custom `Codec`
-Override default JSON serialization using `sonic`:
-```go
-package main
-
-import (
-    "github.com/bytedance/sonic"
-    "github.com/nexuer/ghttp"
+client := ghttp.NewClient(
+    ghttp.WithEndpoint("https://gitlab.com"),
+    ghttp.WithTimeout(10*time.Second),
 )
 
+var projects []Project
+_, err := client.Invoke(
+    context.Background(),
+    http.MethodGet,
+    "/api/v4/projects",
+    nil,
+    &projects,
+    ghttp.Query(map[string]any{"membership": true}),
+)
+```
+
+Use `Do` when the caller needs direct access to the response stream. The caller
+should close the response body after use.
+
+```go
+req, err := http.NewRequest(http.MethodGet, "https://example.com/data", nil)
+if err != nil {
+    return err
+}
+resp, err := client.Do(req)
+if err != nil {
+    return err
+}
+defer resp.Body.Close()
+
+body, err := io.ReadAll(resp.Body)
+```
+
+## Client Options
+
+### Transport, TLS, and Proxy
+
+`WithTransport(transport http.RoundTripper)` sets the HTTP transport. The
+default is `http.DefaultTransport`.
+
+`WithTLSConfig(cfg *tls.Config)` and
+`WithProxy(f func(*http.Request) (*url.URL, error))` are applied only when the
+selected transport is `*http.Transport`.
+
+```go
+client := ghttp.NewClient(
+    ghttp.WithTLSConfig(&tls.Config{MinVersion: tls.VersionTLS12}),
+    ghttp.WithProxy(ghttp.ProxyURL("127.0.0.1:7890")),
+)
+```
+
+When using a custom `RoundTripper` implementation, configure TLS and proxy on
+that transport itself.
+
+### Timeout
+
+`WithTimeout(timeout time.Duration)` sets the default end-to-end timeout. No
+timeout is applied by default. A deadline already present on the context is
+preserved.
+
+For `Do`, a client-managed timeout is released when the response body reaches
+EOF or is closed. The response body should still be closed when it is not read.
+
+### Endpoint and Headers
+
+- `WithEndpoint(endpoint string)` sets the base endpoint.
+- `WithUserAgent(userAgent string)` sets the default User-Agent.
+- `WithContentType(contentType string)` sets the default Accept and
+  Content-Type. The default is `application/json`.
+
+### Proxy
+
+`ProxyURL(address string)` converts common proxy addresses into an
+`http.ProxyURL` function.
+
+```go
+ghttp.WithProxy(ghttp.ProxyURL(":7890"))
+ghttp.WithProxy(http.ProxyFromEnvironment)
+```
+
+### Rate Limiter
+
+`WithLimiter(l Limiter)` installs a blocking outbound request limiter.
+
+```go
+type Limiter interface {
+    Wait(ctx context.Context) error
+}
+```
+
+The limiter runs immediately before the request is sent. Local preparation
+failures do not consume limiter capacity, and limiter wait is part of the
+client timeout.
+
+### Non-2xx Errors
+
+`WithNot2xxError(f func() error)` creates the value used to decode non-2xx
+response bodies.
+
+### Debugging
+
+`WithDebug(true)` enables the default curl-style debugger. `WithDebugger` takes
+effect only when `WithDebug(true)` is also enabled.
+
+```go
+client := ghttp.NewClient(
+    ghttp.WithDebug(true),
+    ghttp.WithDebugger(func() ghttp.Debugger {
+        return &ghttp.Debug{
+            Writer:            os.Stderr,
+            Trace:             true,
+            RequestBodyLimit:  64 << 10,
+            ResponseBodyLimit: 64 << 10,
+            TraceCallback: func(w io.Writer, info ghttp.TraceInfo) {
+                _, _ = w.Write(info.Table())
+            },
+        }
+    }),
+)
+```
+
+Body limit values have the same semantics:
+
+| Value | Behavior |
+| ---: | --- |
+| `0` | Use the default 64 KiB limit |
+| `> 0` | Capture at most this many bytes |
+| `< 0` | Disable logging for that body direction |
+
+- Request previews use `GetBody`; streaming, multipart, and binary bodies are
+  not consumed.
+- Response bytes are logged as the caller reads them. A `Do` response that is
+  never read has no body output.
+- Headers are not redacted.
+- Trace output includes DNS, TCP, TLS, connection reuse, request write, TTFB,
+  and time to response headers. Missing phases are shown as `-`.
+
+## Invocation Options
+
+Both `Invoke` and `Do` accept request-specific options:
+
+```go
+resp, err := client.Invoke(ctx, http.MethodPost, "/message", "hello", &reply,
+    ghttp.ContentType("text/plain"),
+    ghttp.Query(map[string]any{"verbose": true}),
+    ghttp.BearerToken(token),
+    ghttp.Before(func(req *http.Request) error {
+        req.Header.Set("X-Request-ID", requestID)
+        return nil
+    }),
+)
+```
+
+Built-in options include:
+
+- `Query(value)`
+- `ContentType(contentType)`
+- `BasicAuth(username, password)`
+- `BearerToken(token)`
+- `Before(hooks...)`
+- `After(hooks...)`
+
+`ContentType` selects the request codec for `Invoke` and sets both
+`Content-Type` and `Accept`. With `Do`, it only changes the headers; the caller
+owns the existing body. Structured options are applied before `Before` hooks.
+Repeated Query or authentication options use the last non-empty value.
+
+See [query encoding](./query/README.md) for query-tag and nested-value rules.
+
+## Encoding
+
+Codecs are selected from the Content-Type subtype. For example,
+`application/json` and `application/vnd.api+json` both resolve to JSON.
+
+Custom codecs should be registered before concurrent use:
+
+```go
 type codec struct{}
 
-func (codec) Name() string {
-    return "sonic-json"
-}
+func (codec) Name() string { return "sonic-json" }
+func (codec) Marshal(v any) ([]byte, error) { return sonic.Marshal(v) }
+func (codec) Unmarshal(data []byte, v any) error { return sonic.Unmarshal(data, v) }
 
-func (codec) Marshal(v interface{}) ([]byte, error) {
-    return sonic.Marshal(v)
-}
-
-func (codec) Unmarshal(data []byte, v interface{}) error {
-    return sonic.Unmarshal(data, v)
-}
-
-func main() {
+func init() {
     ghttp.RegisterCodec("application/json", codec{})
 }
 ```
 
-Codec lookup helpers:
+Lookup helpers:
 
-- `CodecForContentType(contentType string)` resolves a codec from a Content-Type value.
-- `CodecForRequest(request, headerName...)` resolves a codec from a request header.
-- `CodecForResponse(response, headerName...)` resolves a codec from a response header.
+- `CodecForContentType(contentType string)`
+- `CodecForRequest(request, headerName...)`
+- `CodecForResponse(response, headerName...)`
 
-### Debugging
-Enable debugging with `WithDebug`, output example:
-```text
---------------------------------------------
-Trace                         Value                          
---------------------------------------------
-DNSDuration                   3.955292ms                    
-ConnectDuration               102.718541ms                  
-TLSHandshakeDuration          98.159333ms                   
-RequestDuration               138.834µs                     
-WaitResponseDuration          307.559875ms                  
-TotalDuration                 412.40375ms                   
+## Errors
 
-* Host gitlab.com:443 was resolved.
-* IPv4: 198.18.7.159
-*   Trying 198.18.7.159:443...
-* Connected to gitlab.com (198.18.7.159) port 443
-* SSL connection using TLS 1.3 / TLS_AES_128_GCM_SHA256
-* ALPN: server accepted h2
-* using HTTP/1.1
-> POST /oauth/token HTTP/1.1
-> User-Agent: sdk/gitlab-v0.0.1
-> Accept: application/json
-> Content-Type: application/json
-> Beforehook: BeforeHook
-> Authorization: Basic Z2l0bGFiOnBhc3N3b3Jk
->
+`*ghttp.Error` is the structured client error type. It supports `errors.Is` and
+`errors.As` through `Unwrap`.
 
-{
-    "client_id": "app",
-    "grant_type": "password"
+```go
+httpErr, ok := ghttp.FromError(err)
+if ok {
+    fmt.Println(httpErr.StatusCode)
+    fmt.Println(httpErr.Request)
+    fmt.Println(httpErr.Err)
 }
 
-> HTTP/2.0 401 Unauthorized
-... (remaining output truncated for brevity)
+statusCode, ok := ghttp.StatusCode(err)
 ```
+
+`IsTimeout(err)` recognizes context deadline errors and wrapped `net.Error`
+timeouts.

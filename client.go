@@ -32,9 +32,8 @@ type clientOptions struct {
 	limiter     Limiter
 }
 
-// WithLimiter sets a rate limiter for the client.
-// This limiter will be applied to control the number of requests made
-// to the server, ensuring that the requests stay within the specified limits.
+// WithLimiter sets the blocking outbound request limiter. It runs after local
+// request preparation and immediately before the request is sent.
 func WithLimiter(l Limiter) ClientOption {
 	return func(c *clientOptions) {
 		c.limiter = l
@@ -48,28 +47,32 @@ func WithNot2xxError(f func() error) ClientOption {
 	}
 }
 
-// WithDebugger sets the function to create a new Debugger instance.
+// WithDebugger sets the function used to create a Debugger for each request.
+// It takes effect only when debugging is enabled with WithDebug(true).
 func WithDebugger(f func() Debugger) ClientOption {
 	return func(c *clientOptions) {
 		c.debugger = f
 	}
 }
 
-// WithDebug open debug.
+// WithDebug enables or disables request debugging.
 func WithDebug(open bool) ClientOption {
 	return func(c *clientOptions) {
 		c.debug = open
 	}
 }
 
-// WithTransport with http.RoundTrippe.
+// WithTransport sets the HTTP round tripper. A custom RoundTripper owns all
+// transport-level configuration. WithTLSConfig and WithProxy are not applied
+// unless transport is *http.Transport.
 func WithTransport(transport http.RoundTripper) ClientOption {
 	return func(c *clientOptions) {
 		c.transport = transport
 	}
 }
 
-// WithTLSConfig with tls config.
+// WithTLSConfig configures TLS on the default transport or a transport passed
+// directly as *http.Transport. It is not applied to other RoundTrippers.
 func WithTLSConfig(cfg *tls.Config) ClientOption {
 	return func(c *clientOptions) {
 		c.tlsConf = cfg
@@ -97,14 +100,17 @@ func WithEndpoint(endpoint string) ClientOption {
 	}
 }
 
-// WithContentType with client request content type.
+// WithContentType sets the default Content-Type and Accept headers.
 func WithContentType(contentType string) ClientOption {
 	return func(c *clientOptions) {
-		c.contentType = contentType
+		if contentType != "" {
+			c.contentType = contentType
+		}
 	}
 }
 
-// WithProxy with proxy url.
+// WithProxy configures the proxy on the default transport or a transport
+// passed directly as *http.Transport. It is not applied to other RoundTrippers.
 func WithProxy(f func(*http.Request) (*url.URL, error)) ClientOption {
 	return func(c *clientOptions) {
 		c.proxy = f
@@ -121,7 +127,6 @@ type Client struct {
 func NewClient(opts ...ClientOption) *Client {
 	options := clientOptions{
 		contentType: "application/json",
-		timeout:     5 * time.Second,
 		transport:   http.DefaultTransport,
 	}
 
@@ -170,14 +175,28 @@ func (c *Client) setTimeout(ctx context.Context) (context.Context, context.Cance
 	return ctx, func() {}, false
 }
 
-func (c *Client) setHeader(req *http.Request) {
+func (c *Client) setHeader(req *http.Request, options *callOptions) {
+	if req.Header == nil {
+		req.Header = make(http.Header)
+	}
+
 	if c.opts.userAgent != "" && req.UserAgent() == "" {
 		req.Header.Set("User-Agent", c.opts.userAgent)
 	}
 
-	if c.opts.contentType != "" && req.Header.Get("Content-Type") == "" {
-		req.Header.Set("Accept", c.opts.contentType)
-		req.Header.Set("Content-Type", c.opts.contentType)
+	if options.contentType != "" {
+		req.Header.Set("Content-Type", options.contentType)
+		req.Header.Set("Accept", options.contentType)
+		return
+	}
+
+	contentType := req.Header.Get("Content-Type")
+	if contentType == "" {
+		contentType = c.opts.contentType
+		req.Header.Set("Content-Type", contentType)
+	}
+	if req.Header.Get("Accept") == "" {
+		req.Header.Set("Accept", contentType)
 	}
 }
 
@@ -201,9 +220,10 @@ func (c *Client) Invoke(ctx context.Context, method, path string, args any, repl
 	opts ...CallOption) (resp *http.Response, err error) {
 	ctx, cancel, _ := c.setTimeout(ctx)
 	defer cancel()
+	options := resolveCallOptions(opts...)
 
 	// marshal request body
-	body, err := c.body(args)
+	body, err := c.body(args, options.contentType)
 	if err != nil {
 		return nil, err
 	}
@@ -213,7 +233,7 @@ func (c *Client) Invoke(ctx context.Context, method, path string, args any, repl
 		return nil, err
 	}
 
-	response, err := c.do(req, opts...)
+	response, err := c.do(req, options)
 	if err != nil {
 		return nil, err
 	}
@@ -243,7 +263,7 @@ func (c *Client) Do(req *http.Request, opts ...CallOption) (resp *http.Response,
 		}
 	}()
 
-	response, err := c.do(req, opts...)
+	response, err := c.do(req, resolveCallOptions(opts...))
 	if err != nil {
 		return nil, err
 	}
@@ -261,13 +281,13 @@ func (c *Client) Do(req *http.Request, opts ...CallOption) (resp *http.Response,
 	return response, nil
 }
 
-func (c *Client) do(req *http.Request, opts ...CallOption) (*http.Response, error) {
+func (c *Client) do(req *http.Request, options *callOptions) (*http.Response, error) {
 	if req == nil {
 		return nil, errors.New("http: nil http request")
 	}
 
-	// First set the default header, the user can overwrite
-	c.setHeader(req)
+	// First set the default and structured headers; Before hooks may overwrite them.
+	c.setHeader(req, options)
 
 	// set default endpoint
 	if c.opts.endpoint != "" {
@@ -280,9 +300,16 @@ func (c *Client) do(req *http.Request, opts ...CallOption) (*http.Response, erro
 	}
 
 	var err error
-	// apply CallOption before
-	for _, callOpt := range opts {
-		if err = callOpt.Before(req); err != nil {
+	if options.query != nil {
+		if err = SetQuery(req, options.query); err != nil {
+			return nil, newError(req, nil, err)
+		}
+	}
+	if options.applyAuth != nil {
+		options.applyAuth(req)
+	}
+	for _, hook := range options.beforeHooks {
+		if err = hook(req); err != nil {
 			return nil, newError(req, nil, err)
 		}
 	}
@@ -310,9 +337,8 @@ func (c *Client) do(req *http.Request, opts ...CallOption) (*http.Response, erro
 		return nil, err
 	}
 
-	// apply CallOption After
-	for _, callOpt := range opts {
-		if err = callOpt.After(response); err != nil {
+	for _, hook := range options.afterHooks {
+		if err = hook(response); err != nil {
 			closeResponseBody(response)
 			return nil, newError(req, response, err)
 		}
