@@ -72,7 +72,7 @@ func TestSubContentType(t *testing.T) {
 	for _, v := range tests {
 		target := subContentType(v.contentType)
 		if target != v.want {
-			t.Logf("SubContentType() failed: target=%s want=%s", target, v.want)
+			t.Errorf("subContentType(%q) = %q; want %q", v.contentType, target, v.want)
 		}
 	}
 }

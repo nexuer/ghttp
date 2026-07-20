@@ -48,7 +48,10 @@ func TestError_Error(t *testing.T) {
 		},
 	}
 
-	t.Logf("err: %s", e)
+	want := `POST "https://gitlab.com/oauth/token" [400] - Missing required parameter: grant_type.`
+	if got := e.Error(); got != want {
+		t.Fatalf("Error() = %q; want %q", got, want)
+	}
 }
 
 func TestError_Unwrap(t *testing.T) {
@@ -62,9 +65,16 @@ func TestError_Unwrap(t *testing.T) {
 		StatusCode: http.StatusBadRequest,
 		Err:        ge,
 	}
-	t.Logf("errors.Is(Error, gitlabErr): %t", errors.Is(e, ge))
+	if !errors.Is(e, ge) {
+		t.Fatal("errors.Is() did not find wrapped gitlabErr")
+	}
 	var ge2 *gitlabErr
-	t.Logf("errors.As(Error, gitlabErr): %t - gitlab err: %v", errors.As(e, &ge2), ge2)
+	if !errors.As(e, &ge2) {
+		t.Fatal("errors.As() did not find wrapped *gitlabErr")
+	}
+	if ge2 != ge {
+		t.Fatalf("errors.As() = %p; want %p", ge2, ge)
+	}
 }
 
 type timeoutError struct{}
@@ -95,6 +105,46 @@ func TestIsTimeout(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := IsTimeout(tt.err); got != tt.want {
 				t.Fatalf("IsTimeout(%v) = %t; want %t", tt.err, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFromError(t *testing.T) {
+	want := &Error{StatusCode: http.StatusBadRequest, Err: errors.New("bad request")}
+	wrapped := fmt.Errorf("request failed: %w", want)
+
+	got, ok := FromError(wrapped)
+	if !ok {
+		t.Fatal("FromError() did not find wrapped *Error")
+	}
+	if got != want {
+		t.Fatalf("FromError() = %p; want %p", got, want)
+	}
+
+	status, ok := StatusCode(wrapped)
+	if !ok || status != http.StatusBadRequest {
+		t.Fatalf("StatusCode() = (%d, %t); want (%d, true)", status, ok, http.StatusBadRequest)
+	}
+}
+
+func TestFromErrorRejectsNonGHTTPErrorAndTypedNil(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{name: "nil", err: nil},
+		{name: "unrelated", err: errors.New("unrelated")},
+		{name: "typed nil", err: (*Error)(nil)},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got, ok := FromError(test.err); ok || got != nil {
+				t.Fatalf("FromError() = (%v, %t); want (nil, false)", got, ok)
+			}
+			if status, ok := StatusCode(test.err); ok || status != 0 {
+				t.Fatalf("StatusCode() = (%d, %t); want (0, false)", status, ok)
 			}
 		})
 	}

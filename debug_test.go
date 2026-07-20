@@ -349,6 +349,136 @@ func TestDebugResponseBodyClosesEarlyAndLogsOnce(t *testing.T) {
 	}
 }
 
+func TestDebugRequestBodyLimitsPreviewWithoutConsumingRequest(t *testing.T) {
+	wantBody := `{"message":"abcdefgh"}`
+	req, err := http.NewRequest(http.MethodPost, "http://example.com", strings.NewReader(wantBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	var output bytes.Buffer
+	debugger := &Debug{Writer: &output, RequestBodyLimit: 8}
+
+	debugger.End(req, nil, nil)
+
+	gotBody, err := io.ReadAll(req.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(gotBody) != wantBody {
+		t.Fatalf("actual request body = %q, want %q", gotBody, wantBody)
+	}
+	if !strings.Contains(output.String(), "* request body preview:\n") ||
+		!strings.Contains(output.String(), `{"messag`) ||
+		!strings.Contains(output.String(), "request body truncated after 8 bytes") {
+		t.Fatalf("unexpected request body preview: %q", output.String())
+	}
+}
+
+func TestDebugRequestBodyOmitsBinaryMultipartAndCompressedContent(t *testing.T) {
+	tests := []struct {
+		name            string
+		contentType     string
+		contentEncoding string
+		wantDescription string
+	}{
+		{
+			name:            "binary",
+			contentType:     "application/octet-stream",
+			wantDescription: "application/octet-stream",
+		},
+		{
+			name:            "multipart",
+			contentType:     "multipart/form-data; boundary=test-boundary",
+			wantDescription: "multipart/form-data",
+		},
+		{
+			name:            "compressed text",
+			contentType:     "application/json",
+			contentEncoding: "gzip",
+			wantDescription: "Content-Encoding: gzip",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			req, err := http.NewRequest(http.MethodPost, "http://example.com", strings.NewReader("body"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header.Set("Content-Type", test.contentType)
+			if test.contentEncoding != "" {
+				req.Header.Set("Content-Encoding", test.contentEncoding)
+			}
+			getBodyCalls := 0
+			req.GetBody = func() (io.ReadCloser, error) {
+				getBodyCalls++
+				return io.NopCloser(strings.NewReader("body")), nil
+			}
+			var output bytes.Buffer
+
+			(&Debug{Writer: &output}).End(req, nil, nil)
+
+			if getBodyCalls != 0 {
+				t.Fatalf("GetBody calls = %d, want 0", getBodyCalls)
+			}
+			if !strings.Contains(output.String(), "request body omitted ("+test.wantDescription) {
+				t.Fatalf("unexpected request body output: %q", output.String())
+			}
+		})
+	}
+}
+
+func TestDebugRequestBodyDoesNotConsumeStreamingBody(t *testing.T) {
+	reader := &countingReader{Reader: strings.NewReader("streaming body")}
+	req, err := http.NewRequest(http.MethodPost, "http://example.com", reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "text/plain")
+	if req.GetBody != nil {
+		t.Fatal("test request unexpectedly has GetBody")
+	}
+	var output bytes.Buffer
+
+	(&Debug{Writer: &output}).End(req, nil, nil)
+
+	if reader.reads != 0 {
+		t.Fatalf("Debug.End read the streaming request body %d times", reader.reads)
+	}
+	if !strings.Contains(output.String(), "request body is streaming; not captured (text/plain)") {
+		t.Fatalf("unexpected streaming request output: %q", output.String())
+	}
+	got, err := io.ReadAll(req.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "streaming body" {
+		t.Fatalf("streaming request body = %q, want %q", got, "streaming body")
+	}
+}
+
+func TestDebugRequestBodyPreservesPartialCopyAndReadError(t *testing.T) {
+	readErr := errors.New("request copy interrupted")
+	bodyCopy := &partialErrorReadCloser{data: []byte("partial"), err: readErr}
+	req, err := http.NewRequest(http.MethodPost, "http://example.com", strings.NewReader("actual"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "text/plain")
+	req.GetBody = func() (io.ReadCloser, error) { return bodyCopy, nil }
+	var output bytes.Buffer
+
+	(&Debug{Writer: &output}).End(req, nil, nil)
+
+	if !bodyCopy.closed {
+		t.Fatal("request body copy was not closed")
+	}
+	if !strings.Contains(output.String(), "partial") || !strings.Contains(output.String(), readErr.Error()) {
+		t.Fatalf("debug output does not contain partial request data and error: %q", output.String())
+	}
+}
+
 func TestDebugTraceDurationsIgnoreMissingEvents(t *testing.T) {
 	start := time.Unix(100, 0)
 	state := &traceInfo{
@@ -494,10 +624,11 @@ func TestDebugTraceDoesNotRecordFailedTLSState(t *testing.T) {
 }
 
 func TestDebugEndClosesRequestBodyCopy(t *testing.T) {
-	req, err := http.NewRequest(http.MethodPost, "http://example.com", nil)
+	req, err := http.NewRequest(http.MethodPost, "http://example.com", strings.NewReader("request"))
 	if err != nil {
 		t.Fatal(err)
 	}
+	req.Header.Set("Content-Type", "text/plain")
 	var bodyCopy *trackingReadCloser
 	req.GetBody = func() (io.ReadCloser, error) {
 		bodyCopy = &trackingReadCloser{Reader: strings.NewReader("request")}

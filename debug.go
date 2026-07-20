@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime"
 	"net"
 	"net/http"
 	"net/http/httptrace"
@@ -33,13 +34,18 @@ type Debug struct {
 	Trace         bool
 	TraceCallback func(w io.Writer, info TraceInfo)
 
+	// RequestBodyLimit is the maximum number of replayable text request body
+	// bytes included in debug output. Zero uses the default limit; a negative
+	// value disables request body logging.
+	RequestBodyLimit int64
+
 	// ResponseBodyLimit is the maximum number of response body bytes kept for
 	// debug output. Zero uses the default limit; a negative value disables
 	// response body logging.
 	ResponseBodyLimit int64
 }
 
-const defaultDebugResponseBodyLimit int64 = 64 << 10
+const defaultDebugBodyLimit int64 = 64 << 10
 
 func (d *Debug) writer() io.Writer {
 	if d.Writer == nil {
@@ -245,20 +251,7 @@ func (d *Debug) End(request *http.Request, response *http.Response, err error) {
 	writeHeaders(writer, ">", request.Header, true)
 	write(writer, ">")
 
-	// request body
-	if request.GetBody != nil {
-		if reqBodyReader, err := request.GetBody(); err == nil {
-			reqBody, readErr := io.ReadAll(reqBodyReader)
-			_ = reqBodyReader.Close()
-			if readErr == nil {
-				codec, _ := CodecForRequest(request)
-				reqBodyBs, _ := formatIndent(codec, reqBody)
-				if len(reqBodyBs) > 0 {
-					write(writer, "%s", string(reqBodyBs))
-				}
-			}
-		}
-	}
+	d.writeRequestBody(writer, request)
 
 	if response != nil {
 		write(writer, "")
@@ -319,9 +312,122 @@ func writeHeaders(writer io.Writer, prefix string, header http.Header, skipHost 
 	}
 }
 
+func (d *Debug) requestBodyLimit() int64 {
+	if d.RequestBodyLimit == 0 {
+		return defaultDebugBodyLimit
+	}
+	return d.RequestBodyLimit
+}
+
+func (d *Debug) writeRequestBody(writer io.Writer, request *http.Request) {
+	if request.Body == nil || request.Body == http.NoBody {
+		return
+	}
+	limit := d.requestBodyLimit()
+	if limit < 0 {
+		return
+	}
+
+	previewable, description := requestBodyPreviewable(request)
+	if !previewable {
+		write(writer, "* request body omitted (%s)", requestBodyDescription(description, request.ContentLength))
+		return
+	}
+	if request.GetBody == nil {
+		write(writer, "* request body is streaming; not captured (%s)",
+			requestBodyDescription(description, request.ContentLength))
+		return
+	}
+
+	bodyReader, err := request.GetBody()
+	if err != nil {
+		write(writer, "** REQUEST BODY COPY ERROR: %s", err)
+		return
+	}
+	if bodyReader == nil {
+		write(writer, "** REQUEST BODY COPY ERROR: GetBody returned a nil reader")
+		return
+	}
+
+	body, truncated, readErr := readDebugBody(bodyReader, limit)
+	closeErr := bodyReader.Close()
+	if len(body) > 0 {
+		codec, _ := CodecForRequest(request)
+		formatted, _ := formatIndent(codec, body)
+		if len(formatted) == 0 {
+			formatted = body
+		}
+		write(writer, "* request body preview:")
+		write(writer, "%s", string(formatted))
+	}
+	if truncated {
+		write(writer, "* request body truncated after %d bytes", len(body))
+	}
+	if readErr != nil {
+		write(writer, "** REQUEST BODY ERROR: %s", readErr)
+	}
+	if closeErr != nil {
+		write(writer, "** REQUEST BODY CLOSE ERROR: %s", closeErr)
+	}
+}
+
+func requestBodyPreviewable(request *http.Request) (bool, string) {
+	contentEncoding := strings.Join(request.Header.Values("Content-Encoding"), ",")
+	for _, encoding := range strings.Split(contentEncoding, ",") {
+		encoding = strings.TrimSpace(encoding)
+		if encoding != "" && !strings.EqualFold(encoding, "identity") {
+			return false, "Content-Encoding: " + contentEncoding
+		}
+	}
+
+	contentType := strings.TrimSpace(request.Header.Get("Content-Type"))
+	if contentType == "" {
+		return false, "unknown content type"
+	}
+	mediaType, _, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		return false, "invalid Content-Type: " + contentType
+	}
+	mediaType = strings.ToLower(mediaType)
+	if strings.HasPrefix(mediaType, "text/") ||
+		strings.HasSuffix(mediaType, "+json") ||
+		strings.HasSuffix(mediaType, "+xml") ||
+		strings.HasSuffix(mediaType, "+yaml") {
+		return true, mediaType
+	}
+	switch mediaType {
+	case "application/json", "application/xml", "application/yaml", "application/x-yaml",
+		"application/x-www-form-urlencoded", "application/graphql", "application/javascript",
+		"application/ndjson", "application/x-ndjson", "application/json-seq":
+		return true, mediaType
+	default:
+		return false, mediaType
+	}
+}
+
+func requestBodyDescription(description string, contentLength int64) string {
+	if contentLength > 0 {
+		return fmt.Sprintf("%s, %d bytes", description, contentLength)
+	}
+	return description
+}
+
+func readDebugBody(reader io.Reader, limit int64) ([]byte, bool, error) {
+	maxRead := limit
+	if limit < int64(^uint64(0)>>1) {
+		maxRead++
+	}
+	body, err := io.ReadAll(io.LimitReader(reader, maxRead))
+	truncated := int64(len(body)) > limit
+	if truncated {
+		body = body[:limit]
+	}
+	return body, truncated, err
+}
+
 func (d *Debug) responseBodyLimit() int64 {
 	if d.ResponseBodyLimit == 0 {
-		return defaultDebugResponseBodyLimit
+		return defaultDebugBodyLimit
 	}
 	return d.ResponseBodyLimit
 }

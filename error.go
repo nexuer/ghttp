@@ -29,7 +29,10 @@ func newError(req *http.Request, response *http.Response, err error) *Error {
 	return e
 }
 
-func (e Error) Error() string {
+func (e *Error) Error() string {
+	if e == nil {
+		return "<nil>"
+	}
 	var buf strings.Builder
 
 	if e.Request != nil {
@@ -57,7 +60,10 @@ func (e Error) Error() string {
 	return buf.String()
 }
 
-func (e Error) Unwrap() error {
+func (e *Error) Unwrap() error {
+	if e == nil {
+		return nil
+	}
 	return e.Err
 }
 
@@ -72,10 +78,18 @@ func IsTimeout(err error) bool {
 	return errors.As(err, &netErr) && netErr.Timeout()
 }
 
-func StatusForErr(err error) (int, bool) {
+func FromError(err error) (*Error, bool) {
 	var e *Error
-	if errors.As(err, &e) {
-		return e.StatusCode, true
+	if !errors.As(err, &e) || e == nil {
+		return nil, false
 	}
-	return 0, false
+	return e, true
+}
+
+func StatusCode(err error) (int, bool) {
+	e, ok := FromError(err)
+	if !ok {
+		return 0, false
+	}
+	return e.StatusCode, true
 }

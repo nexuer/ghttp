@@ -28,41 +28,6 @@ func (l *countingLimiter) Wait(context.Context) error {
 	return l.err
 }
 
-func TestClient_Do1(t *testing.T) {
-	opts := []ClientOption{
-		//WithTimeout(1 * time.Millisecond),
-		WithEndpoint("https://gitlab.com"),
-		WithDebug(true),
-		WithNot2xxError(func() error {
-			return &gitlabErr{}
-		}),
-	}
-	c := NewClient(opts...)
-
-	req, err := http.NewRequest(http.MethodGet, "api/v4/projects", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp, err := c.Do(req, &CallOptions{
-		Query: map[string]interface{}{
-			"membership": true,
-		},
-	})
-	if err != nil {
-		if IsTimeout(err) {
-			fmt.Println("timeout!")
-		}
-		t.Fatal(err)
-	}
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	fmt.Println(resp.StatusCode)
-	fmt.Println(string(body))
-}
-
 func TestClient_Do(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		if req.Method != http.MethodGet {
@@ -170,6 +135,89 @@ func TestClient_LimiterError(t *testing.T) {
 	}
 	if got := transportCalls.Load(); got != 0 {
 		t.Fatalf("transport calls = %d; want 0", got)
+	}
+}
+
+func TestInvokeLimiterDoesNotRunWhenBodyMarshalFails(t *testing.T) {
+	limiter := &countingLimiter{}
+	client := NewClient(WithLimiter(limiter))
+
+	_, err := client.Invoke(context.Background(), http.MethodPost, "http://example.test", make(chan int), nil)
+	if err == nil {
+		t.Fatal("Invoke() error = nil; want body marshal error")
+	}
+	if got := limiter.calls.Load(); got != 0 {
+		t.Fatalf("limiter Wait calls = %d; want 0", got)
+	}
+}
+
+func TestInvokeLimiterDoesNotRunWhenRequestCreationFails(t *testing.T) {
+	limiter := &countingLimiter{}
+	client := NewClient(WithLimiter(limiter))
+
+	_, err := client.Invoke(context.Background(), "invalid\nmethod", "http://example.test", nil, nil)
+	if err == nil {
+		t.Fatal("Invoke() error = nil; want request creation error")
+	}
+	if got := limiter.calls.Load(); got != 0 {
+		t.Fatalf("limiter Wait calls = %d; want 0", got)
+	}
+}
+
+func TestLimiterDoesNotRunWhenEndpointParsingFails(t *testing.T) {
+	limiter := &countingLimiter{}
+	client := NewClient(WithLimiter(limiter), WithEndpoint("http://%"))
+	req, err := http.NewRequest(http.MethodGet, "/path", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err = client.Do(req); err == nil {
+		t.Fatal("Do() error = nil; want endpoint parsing error")
+	}
+	if got := limiter.calls.Load(); got != 0 {
+		t.Fatalf("limiter Wait calls = %d; want 0", got)
+	}
+}
+
+func TestLimiterDoesNotRunWhenBeforeHookFails(t *testing.T) {
+	wantErr := errors.New("before hook failed")
+	for _, test := range []struct {
+		name string
+		call func(*Client, CallOption) error
+	}{
+		{
+			name: "Invoke",
+			call: func(client *Client, option CallOption) error {
+				_, err := client.Invoke(context.Background(), http.MethodGet, "http://example.test", nil, nil, option)
+				return err
+			},
+		},
+		{
+			name: "Do",
+			call: func(client *Client, option CallOption) error {
+				req, err := http.NewRequest(http.MethodGet, "http://example.test", nil)
+				if err != nil {
+					return err
+				}
+				_, err = client.Do(req, option)
+				return err
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			limiter := &countingLimiter{}
+			client := NewClient(WithLimiter(limiter))
+			option := Before(func(*http.Request) error { return wantErr })
+
+			err := test.call(client, option)
+			if !errors.Is(err, wantErr) {
+				t.Fatalf("request error = %v; want %v", err, wantErr)
+			}
+			if got := limiter.calls.Load(); got != 0 {
+				t.Fatalf("limiter Wait calls = %d; want 0", got)
+			}
+		})
 	}
 }
 

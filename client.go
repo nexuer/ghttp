@@ -202,12 +202,6 @@ func (c *Client) Invoke(ctx context.Context, method, path string, args any, repl
 	ctx, cancel, _ := c.setTimeout(ctx)
 	defer cancel()
 
-	if c.opts.limiter != nil {
-		if err = c.opts.limiter.Wait(ctx); err != nil {
-			return nil, err
-		}
-	}
-
 	// marshal request body
 	body, err := c.body(args)
 	if err != nil {
@@ -248,12 +242,6 @@ func (c *Client) Do(req *http.Request, opts ...CallOption) (resp *http.Response,
 			cancel()
 		}
 	}()
-
-	if c.opts.limiter != nil {
-		if err = c.opts.limiter.Wait(ctx); err != nil {
-			return nil, err
-		}
-	}
 
 	response, err := c.do(req, opts...)
 	if err != nil {
@@ -296,6 +284,12 @@ func (c *Client) do(req *http.Request, opts ...CallOption) (*http.Response, erro
 	for _, callOpt := range opts {
 		if err = callOpt.Before(req); err != nil {
 			return nil, newError(req, nil, err)
+		}
+	}
+
+	if c.opts.limiter != nil {
+		if err = c.opts.limiter.Wait(req.Context()); err != nil {
+			return nil, err
 		}
 	}
 
