@@ -12,20 +12,21 @@ func TestReadResponseBody(t *testing.T) {
 	tests := []struct {
 		name      string
 		body      string
-		maxBytes  int64
+		maxBytes  []int64
 		want      string
 		wantLarge bool
 	}{
 		{name: "default unlimited", body: "response", want: "response"},
-		{name: "negative unlimited", body: "response", maxBytes: -1, want: "response"},
-		{name: "below limit", body: "response", maxBytes: 9, want: "response"},
-		{name: "exact limit", body: "response", maxBytes: 8, want: "response"},
-		{name: "over limit", body: "response", maxBytes: 7, wantLarge: true},
+		{name: "zero unlimited", body: "response", maxBytes: []int64{0}, want: "response"},
+		{name: "negative unlimited", body: "response", maxBytes: []int64{-1}, want: "response"},
+		{name: "below limit", body: "response", maxBytes: []int64{9}, want: "response"},
+		{name: "exact limit", body: "response", maxBytes: []int64{8}, want: "response"},
+		{name: "over limit", body: "response", maxBytes: []int64{7}, wantLarge: true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := ReadResponseBody(strings.NewReader(tt.body), tt.maxBytes)
+			got, err := ReadResponseBody(strings.NewReader(tt.body), tt.maxBytes...)
 			if got := IsResponseBodyTooLarge(err); got != tt.wantLarge {
 				t.Fatalf("IsResponseBodyTooLarge() = %t; want %t (error: %v)",
 					got, tt.wantLarge, err)

@@ -170,24 +170,28 @@ func SetQuery(req *http.Request, q any) error {
 	return nil
 }
 
-// ReadResponseBody reads a response body without closing it. A positive
-// maxBytes limits the number of bytes returned; non-positive values disable
-// the limit. IsResponseBodyTooLarge reports whether the returned error was
-// caused by the limit.
-func ReadResponseBody(r io.Reader, maxBytes int64) ([]byte, error) {
+// ReadResponseBody reads a response body without closing it. An optional
+// positive maxBytes limits the number of bytes returned; an omitted or
+// non-positive value disables the limit. IsResponseBodyTooLarge reports
+// whether the returned error was caused by the limit.
+func ReadResponseBody(r io.Reader, maxBytes ...int64) ([]byte, error) {
 	if r == nil {
 		return nil, fmt.Errorf("response: nil body")
 	}
-	if maxBytes <= 0 || maxBytes == math.MaxInt64 {
+	limit := int64(0)
+	if len(maxBytes) > 0 {
+		limit = maxBytes[0]
+	}
+	if limit <= 0 || limit == math.MaxInt64 {
 		return io.ReadAll(r)
 	}
 
-	body, err := io.ReadAll(io.LimitReader(r, maxBytes+1))
+	body, err := io.ReadAll(io.LimitReader(r, limit+1))
 	if err != nil {
 		return nil, err
 	}
-	if int64(len(body)) > maxBytes {
-		return nil, fmt.Errorf("%w: limit %d bytes", errResponseBodyTooLarge, maxBytes)
+	if int64(len(body)) > limit {
+		return nil, fmt.Errorf("%w: limit %d bytes", errResponseBodyTooLarge, limit)
 	}
 	return body, nil
 }
