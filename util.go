@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"strings"
@@ -169,6 +170,28 @@ func SetQuery(req *http.Request, q any) error {
 	return nil
 }
 
+// ReadResponseBody reads a response body without closing it. A positive
+// maxBytes limits the number of bytes returned; non-positive values disable
+// the limit. IsResponseBodyTooLarge reports whether the returned error was
+// caused by the limit.
+func ReadResponseBody(r io.Reader, maxBytes int64) ([]byte, error) {
+	if r == nil {
+		return nil, fmt.Errorf("response: nil body")
+	}
+	if maxBytes <= 0 || maxBytes == math.MaxInt64 {
+		return io.ReadAll(r)
+	}
+
+	body, err := io.ReadAll(io.LimitReader(r, maxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(body)) > maxBytes {
+		return nil, fmt.Errorf("%w: limit %d bytes", errResponseBodyTooLarge, maxBytes)
+	}
+	return body, nil
+}
+
 // BindResponseBody binds the body of an HTTP response to the given 'target' struct,
 // automatically decoding the body based on the Content-Type header of the response.
 //
@@ -185,6 +208,10 @@ func SetQuery(req *http.Request, q any) error {
 //	}
 //	// The 'userResponse' struct will now be populated with the decoded response data.
 func BindResponseBody(resp *http.Response, target any) error {
+	return bindResponseBody(resp, target, 0)
+}
+
+func bindResponseBody(resp *http.Response, target any, maxBytes int64) error {
 	if resp == nil || resp.Body == nil {
 		return fmt.Errorf("response: nil body")
 	}
@@ -204,7 +231,7 @@ func BindResponseBody(resp *http.Response, target any) error {
 			resp.Header.Get("Content-Type"))
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := ReadResponseBody(resp.Body, maxBytes)
 	if err != nil {
 		return err
 	}

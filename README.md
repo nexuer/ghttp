@@ -76,6 +76,17 @@ preserved.
 For `Do`, a client-managed timeout is released when the response body reaches
 EOF or is closed. The response body should still be closed when it is not read.
 
+### Response Body Limit
+
+`WithMaxResponseBodyBytes(n int64)` limits response bodies buffered while
+decoding `Invoke` replies and configured non-2xx errors. The default value is
+`0`, which applies no limit. Non-positive values disable the limit. Successful
+response streams returned by `Do` are not limited.
+
+When the limit is exceeded, the returned error can be detected with
+`ghttp.IsResponseBodyTooLarge(err)`. Calls through the client return a
+`*ghttp.Error` carrying the request and response status context.
+
 ### Endpoint and Headers
 
 - `WithEndpoint(endpoint string)` sets the base endpoint.

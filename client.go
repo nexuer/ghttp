@@ -19,17 +19,18 @@ type ClientOption func(*clientOptions)
 
 // Client is an HTTP transport client.
 type clientOptions struct {
-	transport   http.RoundTripper
-	tlsConf     *tls.Config
-	timeout     time.Duration
-	endpoint    string
-	userAgent   string
-	contentType string
-	proxy       func(*http.Request) (*url.URL, error)
-	debugger    func() Debugger
-	debug       bool
-	not2xxError func() error
-	limiter     Limiter
+	transport            http.RoundTripper
+	tlsConf              *tls.Config
+	timeout              time.Duration
+	endpoint             string
+	userAgent            string
+	contentType          string
+	proxy                func(*http.Request) (*url.URL, error)
+	debugger             func() Debugger
+	debug                bool
+	not2xxError          func() error
+	limiter              Limiter
+	maxResponseBodyBytes int64
 }
 
 // WithLimiter sets the blocking outbound request limiter. It runs after local
@@ -37,6 +38,15 @@ type clientOptions struct {
 func WithLimiter(l Limiter) ClientOption {
 	return func(c *clientOptions) {
 		c.limiter = l
+	}
+}
+
+// WithMaxResponseBodyBytes limits response bodies buffered for decoding. A
+// non-positive value disables the limit, which is the default. Streaming
+// response bodies returned by Do are not limited.
+func WithMaxResponseBodyBytes(n int64) ClientOption {
+	return func(c *clientOptions) {
+		c.maxResponseBodyBytes = n
 	}
 }
 
@@ -245,7 +255,7 @@ func (c *Client) Invoke(ctx context.Context, method, path string, args any, repl
 		return nil, err
 	}
 
-	if err = BindResponseBody(response, reply); err != nil {
+	if err = bindResponseBody(response, reply, c.opts.maxResponseBodyBytes); err != nil {
 		return nil, newError(req, response, err)
 	}
 
@@ -394,7 +404,7 @@ func (c *Client) bindNot2xxError(response *http.Response) error {
 		return nil
 	}
 
-	if err := BindResponseBody(response, not2xxError); err != nil {
+	if err := bindResponseBody(response, not2xxError, c.opts.maxResponseBodyBytes); err != nil {
 		return err
 	}
 
