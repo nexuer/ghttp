@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-func TestReadResponseBody(t *testing.T) {
+func TestReadBody(t *testing.T) {
 	tests := []struct {
 		name      string
 		body      string
@@ -26,15 +26,22 @@ func TestReadResponseBody(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := ReadResponseBody(strings.NewReader(tt.body), tt.maxBytes...)
-			if got := IsResponseBodyTooLarge(err); got != tt.wantLarge {
-				t.Fatalf("IsResponseBodyTooLarge() = %t; want %t (error: %v)",
+			got, err := ReadBody(strings.NewReader(tt.body), tt.maxBytes...)
+			if got := IsBodyTooLarge(err); got != tt.wantLarge {
+				t.Fatalf("IsBodyTooLarge() = %t; want %t (error: %v)",
 					got, tt.wantLarge, err)
 			}
 			if got := string(got); got != tt.want {
-				t.Fatalf("ReadResponseBody() = %q; want %q", got, tt.want)
+				t.Fatalf("ReadBody() = %q; want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestReadBodyNilReader(t *testing.T) {
+	body, err := ReadBody(nil)
+	if err == nil || err.Error() != "nil body" {
+		t.Fatalf("ReadBody(nil) = (%q, %v); want (nil, nil body)", body, err)
 	}
 }
 
@@ -61,7 +68,7 @@ func TestInvokeResponseBodyLimit(t *testing.T) {
 	if response != nil {
 		t.Fatal("Invoke() response is non-nil; want nil")
 	}
-	if !IsResponseBodyTooLarge(err) {
+	if !IsBodyTooLarge(err) {
 		t.Fatalf("Invoke() error = %v; want response body too large", err)
 	}
 	httpErr, ok := FromError(err)
@@ -130,7 +137,7 @@ func TestNot2xxResponseBodyLimit(t *testing.T) {
 	if response != nil {
 		t.Fatal("Do() response is non-nil; want nil")
 	}
-	if !IsResponseBodyTooLarge(err) {
+	if !IsBodyTooLarge(err) {
 		t.Fatalf("Do() error = %v; want response body too large", err)
 	}
 	httpErr, ok := FromError(err)

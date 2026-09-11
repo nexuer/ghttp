@@ -79,7 +79,7 @@ Context 已经带有 deadline 时，不会覆盖它。
 解码时缓冲的 Body 大小。默认值为 `0`，表示不限制；非正数都会禁用限制。`Do`
 返回的成功响应流不会被限制。
 
-超过限制时，可以通过 `ghttp.IsResponseBodyTooLarge(err)` 判断。通过 Client 调用时，
+超过限制时，可以通过 `ghttp.IsBodyTooLarge(err)` 判断。通过 Client 调用时，
 返回的 `*ghttp.Error` 仍会携带请求和响应状态信息。
 
 ### Endpoint 与 Header

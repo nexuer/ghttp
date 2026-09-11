@@ -9,7 +9,7 @@ import (
 	"strings"
 )
 
-var errResponseBodyTooLarge = errors.New("response body too large")
+var errBodyTooLarge = errors.New("body too large")
 
 // Error describes a failed HTTP request and wraps its underlying error.
 type Error struct {
@@ -73,10 +73,10 @@ func (e *Error) Unwrap() error {
 	return e.Err
 }
 
-// IsResponseBodyTooLarge reports whether err was caused by a response body
+// IsBodyTooLarge reports whether err was caused by a body
 // exceeding the configured maximum size.
-func IsResponseBodyTooLarge(err error) bool {
-	return errors.Is(err, errResponseBodyTooLarge)
+func IsBodyTooLarge(err error) bool {
+	return errors.Is(err, errBodyTooLarge)
 }
 
 // IsTimeout reports whether err represents a context or network timeout.
